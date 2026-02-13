@@ -656,12 +656,24 @@ input[type="number"] {
     flex: 1;
 }
 
+#labUrlInput {
+    flex: 2.25;
+    min-width: 440px;
+}
+
+#labSelectorInput {
+    flex: 1;
+    min-width: 220px;
+    max-width: 360px;
+}
+
 .lab-result {
     border: 1px solid var(--border);
     background: rgba(0, 0, 0, 0.2);
     border-radius: 0.6rem;
     padding: 0.8rem;
     min-height: 72px;
+    overflow-x: hidden;
 }
 
 .lab-grid {
@@ -673,6 +685,17 @@ input[type="number"] {
 
 .lab-title {
     grid-column: 1 / -1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.lab-result code {
+    display: inline-block;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .lab-label {
@@ -1305,7 +1328,7 @@ input[type="number"] {
     z-index: 100000;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.8);
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity 0.25s ease;
     transform: translate(-50%, -100%);
     margin-top: -8px;
     /* No blur needed for solid opaque tooltips */

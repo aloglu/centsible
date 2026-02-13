@@ -366,11 +366,15 @@ const SITE_ADAPTERS = [
     {
         match: /amazon\./i,
         selectors: [
-            '.a-price .a-offscreen',
-            '#corePrice_feature_div .a-offscreen',
+            '#corePrice_feature_div .a-price .a-offscreen',
+            '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
+            '#corePriceDisplay_mobile_feature_div .a-price .a-offscreen',
+            '#apex_desktop .a-price .a-offscreen',
+            '#apex_mobile .a-price .a-offscreen',
             '#price_inside_buybox',
             '#priceblock_saleprice',
-            '#priceblock_ourprice'
+            '#priceblock_ourprice',
+            'input#twister-plus-price-data-price'
         ]
     },
     {
@@ -414,6 +418,14 @@ function getSiteSelectors(hostname) {
     return adapter ? adapter.selectors : [];
 }
 
+function isAmazonTarget(targetUrl = '') {
+    try {
+        return /amazon\./i.test(new URL(targetUrl).hostname);
+    } catch {
+        return /amazon\./i.test(String(targetUrl || ''));
+    }
+}
+
 function detectCurrencyFromText(text, fallback = 'USD') {
     const t = String(text || '').toUpperCase();
     if (/(\u20BA|(^|[^A-Z])TRY([^A-Z]|$)|(^|[^A-Z])TL([^A-Z]|$))/i.test(t)) return 'TRY';
@@ -434,7 +446,9 @@ const OUT_OF_STOCK_TERMS = [
     'backorder', 'back order', 'preorder', 'pre-order', 'notify me',
     'email me when available', 'coming soon',
     'stokta yok', 'stok yok', 'stokta bulunmuyor', 'stokta bulunmamakta', 'stokta bulunmamaktadir',
-    'mevcut degil', 'tukendi', 'satista degil', 'stoga gelince haber ver', 'haber ver',
+    'mevcut degil', 'su anda mevcut degil', 'su an mevcut degil', 'gecici olarak stokta yok',
+    'simdilik mevcut degil', 'urun mevcut degil', 'tukendi', 'satista degil', 'satista yok',
+    'stoga gelince haber ver', 'haber ver',
     'agotado', 'sin stock', 'no disponible',
     'rupture de stock', 'epuise', 'indisponible',
     'ausverkauft', 'nicht verfugbar', 'nicht auf lager',
@@ -508,10 +522,29 @@ function detectAvailability($, htmlString, targetUrl = '') {
     let bestIn = { score: 0, reason: '', source: '' };
     let hasEnabledPurchaseAction = false;
     let hasDisabledPurchaseAction = false;
+    let hasBuyingOptionsAction = false;
+    let hasAmazonBuyingOptionsStructure = false;
+    let hasAmazonUnqualifiedBuyBox = false;
     let requiresVariantSelection = false;
     let hasVariantSelectors = false;
     let structuredOut = null;
     let structuredIn = null;
+    const isAmazon = isAmazonTarget(targetUrl);
+    const withSignals = (result) => ({
+        ...result,
+        signals: {
+            isAmazon,
+            hasEnabledPurchaseAction,
+            hasDisabledPurchaseAction,
+            hasBuyingOptionsAction,
+            hasAmazonBuyingOptionsStructure,
+            hasAmazonUnqualifiedBuyBox,
+            requiresVariantSelection,
+            hasVariantSelectors,
+            bestInScore: bestIn.score,
+            bestOutScore: bestOut.score
+        }
+    });
 
     const isLikelyHidden = (el) => {
         const node = $(el);
@@ -539,7 +572,7 @@ function detectAvailability($, htmlString, targetUrl = '') {
     const classifyStructuredToken = (rawValue) => {
         const v = normalizeAvailabilityText(rawValue);
         if (!v) return null;
-        if (/(outofstock|out_of_stock|soldout|sold_out|discontinued|unavailable|notinstock|preorder|pre-order|backorder|back-order)/.test(v)) {
+        if (/(outofstock|out_of_stock|soldout|sold_out|discontinued|unavailable|currentlyunavailable|temporarilyunavailable|notinstock|preorder|pre-order|backorder|back-order)/.test(v)) {
             return { status: 'out_of_stock', confidence: 94, reason: v.slice(0, 120) };
         }
         if (/(instock|in_stock|limitedavailability|availablefororder)/.test(v)) {
@@ -604,7 +637,13 @@ function detectAvailability($, htmlString, targetUrl = '') {
 
     const stockSelectors = [
         '#availability',
+        '#availability span',
+        '#availabilityInsideBuyBox_feature_div',
+        '#availabilityInsideBuyBox_feature_div span',
         '#outOfStock',
+        '#outOfStock span',
+        '#availabilityMessage_feature_div',
+        '#availabilityMessage_feature_div span',
         '[itemprop="availability"]',
         '[class*="stock"]',
         '[id*="stock"]',
@@ -622,10 +661,47 @@ function detectAvailability($, htmlString, targetUrl = '') {
             if (isLikelyHidden(el)) return;
             const text = $(el).attr('content') || $(el).attr('aria-label') || $(el).text();
             const compact = normalizeAvailabilityText(text);
-            if (!compact || compact.length > 180) return;
+            if (!compact || compact.length > 500) return;
             considerSignal(compact, 18, `selector:${sel}`);
         });
     });
+
+    if (isAmazon) {
+        hasAmazonUnqualifiedBuyBox = $('#unqualifiedBuyBox, #unqualifiedBuyBox_feature_div').length > 0;
+        if (hasAmazonUnqualifiedBuyBox) {
+            hasBuyingOptionsAction = true;
+            if (bestOut.score < 88) {
+                bestOut = { score: 88, reason: 'unqualified buy box', source: 'amazon-unqualified-buybox' };
+            }
+        }
+
+        hasAmazonBuyingOptionsStructure = $([
+            '#buybox-see-all-buying-choices',
+            '[data-action="show-all-offers-display"]',
+            '#all-offers-display',
+            '#aod-has-oas-offers',
+            'a[href*="/gp/offer-listing/"]',
+            'a[href*="ref=dp_olp"]'
+        ].join(',')).length > 0;
+        if (hasAmazonBuyingOptionsStructure) {
+            hasBuyingOptionsAction = true;
+            if (bestOut.score < 72) {
+                bestOut = { score: 72, reason: 'amazon buying options structure', source: 'amazon-buying-options-structure' };
+            }
+        }
+
+        $('#buybox a, #desktop_buybox a, #availability_feature_div a').slice(0, 80).each((_, el) => {
+            if (isLikelyHidden(el)) return;
+            const t = normalizeAvailabilityText($(el).attr('aria-label') || $(el).text());
+            if (!t) return;
+            if (/(see all buying options|all buying options|buying options|satin alma seceneklerini gor|satın alma seceneklerini gor|satın alma seçeneklerini gör)/.test(t)) {
+                hasBuyingOptionsAction = true;
+                if (bestOut.score < 74) {
+                    bestOut = { score: 74, reason: t, source: 'amazon-buying-options-link' };
+                }
+            }
+        });
+    }
 
     $('button, input[type="submit"], [role="button"], a[role="button"]').slice(0, 160).each((_, el) => {
         if (isLikelyHidden(el)) return;
@@ -643,10 +719,16 @@ function detectAvailability($, htmlString, targetUrl = '') {
             || node.attr('disabled') !== undefined
             || normalizeAvailabilityText(node.attr('aria-disabled')) === 'true';
 
-        considerSignal(normalizedText, isDisabled ? 12 : 6, 'button');
+        const hasKeyboardShortcutHint = /(shift|alt|option|ctrl|cmd|command)\b/.test(normalizedText);
+        const looksLikeShortcutPurchaseLabel = /(add to cart|buy now|sepete ekle|hemen al|satin al|satın al)/.test(normalizedText) && hasKeyboardShortcutHint;
+        if (!(isAmazon && looksLikeShortcutPurchaseLabel)) {
+            considerSignal(normalizedText, isDisabled ? 12 : 6, 'button');
+        }
 
-        const isPurchaseAction = /(add to cart|buy now|checkout|sepete ekle|hemen al|satin al|satın al)/.test(normalizedText)
-            || /(add|buy|cart|basket|sepet|checkout|purchase)/.test(attrBlob);
+        const actionBlob = `${normalizedText} ${attrBlob}`;
+        const isBuyingOptionsAction = /(see all buying options|all buying options|buying options|satin alma seceneklerini gor|satın alma seceneklerini gor|satın alma seçeneklerini gör)/.test(normalizedText);
+        const isPurchaseAction = /(add to cart|buy now|checkout|sepete ekle|hemen al|satin al|satın al|addtocart|buynow|buy-now)/.test(actionBlob)
+            && !(isAmazon && looksLikeShortcutPurchaseLabel);
         const isNotifyAction = /(notify me|email me|haber ver|gelince haber ver)/.test(normalizedText);
         const isVariantSelectionPrompt = /(select size|choose size|select option|choose option|select variant|choose variant|beden sec|beden seç|numara sec|numara seç|varyant sec|varyant seç|renk sec|renk seç|lütfen sec|lutfen sec)/.test(normalizedText);
 
@@ -654,13 +736,19 @@ function detectAvailability($, htmlString, targetUrl = '') {
             requiresVariantSelection = true;
         }
 
-        if (isPurchaseAction && !isDisabled) {
+        if (isBuyingOptionsAction) {
+            hasBuyingOptionsAction = true;
+        }
+        if (isBuyingOptionsAction && !hasEnabledPurchaseAction && bestOut.score < 68) {
+            bestOut = { score: 68, reason: normalizedText || 'buying options only', source: 'buying-options' };
+        }
+        if (isPurchaseAction && !isDisabled && !isBuyingOptionsAction) {
             hasEnabledPurchaseAction = true;
             if (bestIn.score < 78) {
                 bestIn = { score: 78, reason: normalizedText || attrBlob || 'purchase-action', source: 'purchase-action' };
             }
         }
-        if (isPurchaseAction && isDisabled) {
+        if (isPurchaseAction && isDisabled && !isBuyingOptionsAction) {
             hasDisabledPurchaseAction = true;
             if (bestOut.score < 80) {
                 bestOut = { score: 80, reason: normalizedText || 'disabled purchase action', source: 'purchase-action-disabled' };
@@ -710,62 +798,94 @@ function detectAvailability($, htmlString, targetUrl = '') {
     if ((requiresVariantSelection || hasVariantSelectors) && hasDisabledPurchaseAction && !hasEnabledPurchaseAction) {
         const outIsStrongStructured = structuredOut && structuredOut.confidence >= 94;
         if (!outIsStrongStructured && bestOut.score < 92) {
-            return {
+            return withSignals({
                 status: 'in_stock',
                 confidence: Math.max(bestIn.score, 72),
                 reason: bestIn.reason || 'Variant selection required before purchase',
                 source: bestIn.source || 'variant-selection'
-            };
+            });
         }
     }
 
     if (structuredOut && (!structuredIn || structuredOut.confidence >= structuredIn.confidence + 2)) {
-        return structuredOut;
+        return withSignals(structuredOut);
     }
     if (structuredIn && !structuredOut) {
-        return structuredIn;
+        return withSignals(structuredIn);
     }
 
     if (hasEnabledPurchaseAction && !hasDisabledPurchaseAction && bestOut.score < 88) {
-        return {
+        return withSignals({
             status: 'in_stock',
             confidence: Math.max(bestIn.score, 74),
             reason: bestIn.reason || 'Purchase action available',
             source: bestIn.source || 'purchase-action'
-        };
+        });
     }
 
     if (bestOut.score >= 82 && bestOut.score >= bestIn.score + 10) {
-        return {
+        return withSignals({
             status: 'out_of_stock',
             confidence: bestOut.score,
             reason: bestOut.reason || 'Out-of-stock signal detected',
             source: bestOut.source || null
-        };
+        });
     }
     if (bestIn.score >= 72 && bestIn.score >= bestOut.score + 6) {
-        return {
+        return withSignals({
             status: 'in_stock',
             confidence: bestIn.score,
             reason: bestIn.reason || 'In-stock signal detected',
             source: bestIn.source || null
-        };
+        });
     }
     if (hasDisabledPurchaseAction && bestOut.score >= 74) {
-        return {
+        return withSignals({
             status: 'out_of_stock',
             confidence: bestOut.score,
             reason: bestOut.reason || 'Disabled purchase action detected',
             source: bestOut.source || 'purchase-action-disabled'
-        };
+        });
     }
 
-    return {
+    if (isAmazon && !hasEnabledPurchaseAction) {
+        const amazonAvailabilityText = normalizeAvailabilityText([
+            $('#availability').text(),
+            $('#availability_feature_div').text(),
+            $('#availabilityInsideBuyBox_feature_div').text(),
+            $('#outOfStock').text(),
+            $('#availabilityMessage_feature_div').text(),
+            $('meta[name="description"]').attr('content'),
+            $('title').text()
+        ].filter(Boolean).join(' '));
+        if (/(currently unavailable|temporarily unavailable|temporarily out of stock|currently out of stock|out of stock|not available|stokta yok|stokta bulunmuyor|su anda mevcut degil|gecici olarak stokta yok|urun mevcut degil|mevcut degil)/.test(amazonAvailabilityText)) {
+            return withSignals({
+                status: 'out_of_stock',
+                confidence: Math.max(bestOut.score, 90),
+                reason: amazonAvailabilityText.slice(0, 180) || 'Amazon availability indicates out of stock',
+                source: 'amazon-availability'
+            });
+        }
+    }
+
+    // Amazon pages can expose "buying options" even when first-party stock is unavailable.
+    // If there is no reliable on-page price and only buying-options actions are present,
+    // classify as out_of_stock for primary offer tracking.
+    if (isAmazon && hasBuyingOptionsAction && !hasEnabledPurchaseAction && bestIn.score < 78) {
+        return withSignals({
+            status: 'out_of_stock',
+            confidence: Math.max(bestOut.score, 84),
+            reason: bestOut.reason || 'Buying options shown without a direct purchasable offer/price',
+            source: bestOut.source || 'buying-options'
+        });
+    }
+
+    return withSignals({
         status: 'unknown',
         confidence: Math.max(bestIn.score, bestOut.score, 0),
         reason: '',
         source: null
-    };
+    });
 }
 
 function normalizePriceString(rawNum, currencyHint = 'USD') {
@@ -798,6 +918,12 @@ function extractNumericCandidates(text) {
     if (!text) return [];
     const re = /([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})|[0-9]+(?:[.,][0-9]{1,2})?)/g;
     return Array.from(String(text).matchAll(re)).map(m => m[1]).slice(0, 6);
+}
+
+function normalizeConfidence(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, Math.round(n)));
 }
 
 function buildCandidate(text, selector, source, preferredCurrency, scoreBase = 0) {
@@ -868,16 +994,6 @@ function extractFromRawPatterns(htmlString, preferredCurrency, targetUrl = '') {
     const reOffer = /"price"\s*:\s*"([^"]+)"[^}]{0,200}?"priceCurrency"\s*:\s*"([A-Z]{3})"/gi;
     for (const m of html.matchAll(reOffer)) {
         pushRaw(m[1], m[2], 90, 'raw-json');
-    }
-
-    if (/amazon\./i.test(targetUrl)) {
-        const reAmazonDisplay = /"displayPrice"\s*:\s*"([^"]+)"/gi;
-        for (const m of html.matchAll(reAmazonDisplay)) {
-            const raw = m[1];
-            const currency = detectCurrencyFromText(raw, preferredCurrency);
-            const priceBits = extractNumericCandidates(raw);
-            if (priceBits[0]) pushRaw(priceBits[0], currency, 92, 'amazon-pattern', '.a-price');
-        }
     }
 
     return candidates;
@@ -968,11 +1084,14 @@ function rankCandidates(candidates) {
 function parseHtml(htmlString, customSelector = null, targetUrl = '') {
     const $ = cheerio.load(htmlString);
     const { preferredCurrency, selectors: siteSelectors } = getDomainHints(targetUrl);
+    const isAmazon = isAmazonTarget(targetUrl);
     const candidates = [];
     const availability = detectAvailability($, htmlString, targetUrl);
 
     candidates.push(...extractFromJsonLd($, preferredCurrency));
-    candidates.push(...extractFromRawPatterns(htmlString, preferredCurrency, targetUrl));
+    if (!isAmazon) {
+        candidates.push(...extractFromRawPatterns(htmlString, preferredCurrency, targetUrl));
+    }
 
     if (customSelector) {
         const customSelectors = [
@@ -985,25 +1104,44 @@ function parseHtml(htmlString, customSelector = null, targetUrl = '') {
         candidates.push(...collectSelectorCandidates($, customSelectors, preferredCurrency, 'custom', 88));
     }
 
-    const selectors = [...new Set([...siteSelectors, ...BASE_PRICE_SELECTORS])];
+    const selectors = isAmazon
+        ? [...new Set([
+            ...siteSelectors,
+            'meta[property="og:price:amount"]',
+            'meta[itemprop="price"]',
+            'meta[property="product:price:amount"]'
+        ])]
+        : [...new Set([...siteSelectors, ...BASE_PRICE_SELECTORS])];
     candidates.push(...collectSelectorCandidates($, selectors, preferredCurrency, 'selector', 60));
 
-    const priceLikeTexts = [];
-    $('body *').slice(0, 1200).each((_, el) => {
-        const txt = $(el).text();
-        if (!txt) return;
-        const compact = txt.replace(/\s+/g, ' ').trim();
-        if (!compact || compact.length < 2 || compact.length > 140) return;
-        if (/(price|fiyat|discount|sale|deal|ourprice|\u20ba|\u20ac|\u00a3|\$|TRY|USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY)/i.test(compact)) {
-            priceLikeTexts.push(compact);
+    if (!isAmazon) {
+        const priceLikeTexts = [];
+        $('body *').slice(0, 1200).each((_, el) => {
+            const txt = $(el).text();
+            if (!txt) return;
+            const compact = txt.replace(/\s+/g, ' ').trim();
+            if (!compact || compact.length < 2 || compact.length > 140) return;
+            if (/(price|fiyat|discount|sale|deal|ourprice|\u20ba|\u20ac|\u00a3|\$|TRY|USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY)/i.test(compact)) {
+                priceLikeTexts.push(compact);
+            }
+        });
+        for (const txt of priceLikeTexts.slice(0, 120)) {
+            const c = buildCandidate(txt, '', 'text', preferredCurrency, 30);
+            if (c) candidates.push(c);
         }
-    });
-    for (const txt of priceLikeTexts.slice(0, 120)) {
-        const c = buildCandidate(txt, '', 'text', preferredCurrency, 30);
-        if (c) candidates.push(c);
     }
 
-    const ranked = rankCandidates(candidates);
+    const amazonScopedCandidates = isAmazon
+        ? candidates.filter((c) => {
+            const sel = String(c.selector || '').toLowerCase();
+            if (c.source === 'custom') return true;
+            if (sel.includes('#coreprice') || sel.includes('#priceblock_') || sel.includes('#price_inside_buybox') || sel.includes('#apex_') || sel.includes('twister-plus-price-data-price')) return true;
+            if (sel.includes('meta[itemprop="price"]') || sel.includes('meta[property="og:price:amount"]') || sel.includes('meta[property="product:price:amount"]')) return true;
+            return false;
+        }).filter((c) => c.currency === preferredCurrency)
+        : candidates;
+
+    const ranked = rankCandidates(amazonScopedCandidates);
     const best = ranked[0] || null;
     const suggestions = ranked.slice(0, 5).map(c => ({
         selector: c.selector || '(text candidate)',
@@ -1013,26 +1151,52 @@ function parseHtml(htmlString, customSelector = null, targetUrl = '') {
         currency: c.currency
     }));
 
-    if (!best) {
+    const shouldSuppressAmazonOutOfStockPrice = isAmazon
+        && availability.status === 'out_of_stock'
+        && Number(availability.confidence || 0) >= 80;
+
+    const noPriceConfidence = (() => {
+        const stockConf = Number(availability && availability.confidence);
+        if (Number.isFinite(stockConf) && stockConf > 0 && availability && availability.status === 'out_of_stock') {
+            return stockConf;
+        }
+        return 0;
+    })();
+
+    if (!best || shouldSuppressAmazonOutOfStockPrice) {
         return {
             price: null,
             currency: preferredCurrency,
-            confidence: 0,
+            confidence: normalizeConfidence(noPriceConfidence),
             selectorUsed: null,
             source: null,
             suggestions,
-            availability
+            availability,
+            debug: {
+                isAmazon,
+                candidateCount: candidates.length,
+                rankedCount: ranked.length,
+                suppressedPriceBecauseOutOfStock: shouldSuppressAmazonOutOfStockPrice,
+                availabilitySignals: availability && availability.signals ? availability.signals : null
+            }
         };
     }
 
     return {
         price: best.price,
         currency: best.currency || preferredCurrency,
-        confidence: best.score,
+        confidence: normalizeConfidence(best.score),
         selectorUsed: best.selector || null,
         source: best.source || null,
         suggestions,
-        availability
+        availability,
+        debug: {
+            isAmazon,
+            candidateCount: candidates.length,
+            rankedCount: ranked.length,
+            suppressedPriceBecauseOutOfStock: false,
+            availabilitySignals: availability && availability.signals ? availability.signals : null
+        }
     };
 }
 
@@ -1617,7 +1781,8 @@ app.post('/api/test-selector', async (req, res) => {
             source: result.source || null,
             selectorUsed: result.selectorUsed,
             suggestions: result.suggestions || [],
-            availability: result.availability || { status: 'unknown', confidence: 0, reason: '', source: null }
+            availability: result.availability || { status: 'unknown', confidence: 0, reason: '', source: null },
+            debug: result.debug || null
         });
     } catch (e) {
         const isValidationError = [
@@ -1651,7 +1816,8 @@ app.post('/api/extract', async (req, res) => {
             source: result.source || null,
             selectorUsed: result.selectorUsed,
             suggestions: result.suggestions || [],
-            availability: result.availability || { status: 'unknown', confidence: 0, reason: '', source: null }
+            availability: result.availability || { status: 'unknown', confidence: 0, reason: '', source: null },
+            debug: result.debug || null
         });
     } catch (e) {
         const isValidationError = [

@@ -417,8 +417,11 @@ class App {
             const savedNewItemList = localStorage.getItem('pt_new_item_list');
             const allowedSorts = new Set([
                 'name_asc', 'name_desc',
+                'list_asc', 'list_desc',
                 'price_asc', 'price_desc',
                 'discount_asc', 'discount_desc',
+                'confidence_asc', 'confidence_desc',
+                'status_asc', 'status_desc',
                 'checked_asc', 'checked_desc'
             ]);
             if (savedSort && allowedSorts.has(savedSort)) this.sortMethod = savedSort;
@@ -504,6 +507,13 @@ class App {
             day: 'numeric',
             year: 'numeric'
         });
+    }
+
+    formatConfidence(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return 'n/a';
+        const clamped = Math.max(0, Math.min(100, Math.round(n)));
+        return `${clamped}%`;
     }
 
     // --- Server Communications ---
@@ -1022,7 +1032,7 @@ class App {
             container.innerHTML = entries.slice(0, 40).map(e => `
                 <div class="diag-row ${e.ok ? 'ok' : 'fail'}">
                     <div>${e.itemName || e.itemId} ${e.ok ? `${e.outOfStock ? '| Out of stock' : `| ${e.price ?? '-'} ${e.currency || ''}`}` : '| Check failed'}</div>
-                    <div class="diag-meta">${new Date(e.time).toLocaleString()} | conf: ${e.confidence ?? 'n/a'} | src: ${e.source || 'n/a'} | sel: ${e.selectorUsed || 'n/a'}${e.stockReason ? ` | stock: ${e.stockReason}` : ''}${e.error ? ` | err: ${e.error}` : ''}</div>
+                    <div class="diag-meta">${new Date(e.time).toLocaleString()} | conf: ${this.formatConfidence(e.confidence)} | src: ${e.source || 'n/a'} | sel: ${e.selectorUsed || 'n/a'}${e.stockReason ? ` | stock: ${e.stockReason}` : ''}${e.error ? ` | err: ${e.error}` : ''}</div>
                 </div>
             `).join('');
         } catch (e) {
@@ -1161,6 +1171,22 @@ class App {
                 });
             }
         });
+
+        if (labUrl) {
+            let shouldSelectAllOnFocus = true;
+            labUrl.addEventListener('focus', () => {
+                if (!shouldSelectAllOnFocus) return;
+                requestAnimationFrame(() => labUrl.select());
+            });
+            labUrl.addEventListener('mouseup', (e) => {
+                if (!shouldSelectAllOnFocus) return;
+                e.preventDefault();
+                shouldSelectAllOnFocus = false;
+            });
+            labUrl.addEventListener('blur', () => {
+                shouldSelectAllOnFocus = true;
+            });
+        }
     }
 
     setupGlobalShortcuts() {
@@ -1598,6 +1624,8 @@ class App {
             if (m === 'price_desc') return bPriceInUSD - aPriceInUSD;
             if (m === 'name_asc') return a.name.localeCompare(b.name);
             if (m === 'name_desc') return b.name.localeCompare(a.name);
+            if (m === 'list_asc') return this.getListName(a.listId || 'default').localeCompare(this.getListName(b.listId || 'default'));
+            if (m === 'list_desc') return this.getListName(b.listId || 'default').localeCompare(this.getListName(a.listId || 'default'));
 
             // Complex Sorts
             const getDiscount = (item) => {
@@ -1608,6 +1636,10 @@ class App {
 
             if (m === 'discount_desc') return getDiscount(b) - getDiscount(a);
             if (m === 'discount_asc') return getDiscount(a) - getDiscount(b);
+            if (m === 'confidence_desc') return Number(b.extractionConfidence || 0) - Number(a.extractionConfidence || 0);
+            if (m === 'confidence_asc') return Number(a.extractionConfidence || 0) - Number(b.extractionConfidence || 0);
+            if (m === 'status_desc') return this.getItemStatus(b).text.localeCompare(this.getItemStatus(a).text);
+            if (m === 'status_asc') return this.getItemStatus(a).text.localeCompare(this.getItemStatus(b).text);
 
             // Checked Sorts
             if (m === 'checked_desc') return new Date(b.lastChecked) - new Date(a.lastChecked);
@@ -1652,10 +1684,11 @@ class App {
     getStockMeta(item) {
         const status = String(item?.stockStatus || 'unknown');
         if (status === 'out_of_stock') {
+            const reason = String(item?.stockReason || '').trim();
             return {
                 isOut: true,
                 text: 'Out of Stock',
-                title: item?.stockReason || 'Item appears to be unavailable on the source page.'
+                title: reason ? `Out of Stock: ${reason}` : 'Out of Stock'
             };
         }
         if (status === 'in_stock') {
@@ -1810,9 +1843,9 @@ class App {
 
     getConfidenceMeta(item) {
         const value = Number(item.extractionConfidence || 0);
-        if (value >= 80) return { text: `${Math.round(value)}`, className: 'confidence-high' };
-        if (value >= 55) return { text: `${Math.round(value)}`, className: 'confidence-mid' };
-        return { text: value > 0 ? `${Math.round(value)}` : 'n/a', className: 'confidence-low' };
+        if (value >= 80) return { text: this.formatConfidence(value), className: 'confidence-high' };
+        if (value >= 55) return { text: this.formatConfidence(value), className: 'confidence-mid' };
+        return { text: this.formatConfidence(value), className: 'confidence-low' };
     }
 
     getItemStatus(item) {
@@ -1820,7 +1853,7 @@ class App {
         const lastChecked = item.lastChecked ? new Date(item.lastChecked).getTime() : 0;
         const hoursSince = lastChecked ? (now - lastChecked) / 3600000 : 999;
         const conf = Number(item.extractionConfidence || 0);
-        if (item.stockStatus === 'out_of_stock') return { text: 'Out of Stock', className: 'status-oos' };
+        if (item.stockStatus === 'out_of_stock') return { text: 'OOS', className: 'status-oos' };
         if (item.targetPrice && item.currentPrice <= item.targetPrice) return { text: 'Target Hit', className: 'status-hit' };
         if (!item.currentPrice) return { text: 'No Price', className: 'status-issue' };
         if (hoursSince > 6) return { text: 'Stale', className: 'status-stale' };
@@ -1898,7 +1931,7 @@ class App {
                 alerts.push({ severity: 'warning', text: `${item.name}: stale check`, id: item.id });
             }
             if (rules.lowConfidenceEnabled && Number(item.extractionConfidence || 0) > 0 && Number(item.extractionConfidence) < Number(rules.lowConfidenceThreshold || 55)) {
-                alerts.push({ severity: 'warning', text: `${item.name}: low extraction confidence (${Math.round(item.extractionConfidence)})`, id: item.id });
+                alerts.push({ severity: 'warning', text: `${item.name}: low extraction confidence (${this.formatConfidence(item.extractionConfidence)})`, id: item.id });
             }
             if (rules.allTimeLowEnabled && Array.isArray(item.history) && item.history.length > 2) {
                 const prices = item.history.map(h => Number(h.price)).filter(Number.isFinite);
@@ -1952,11 +1985,15 @@ class App {
                     <div class="lab-grid">
                         <div><span class="lab-label">Price:</span> ${data.price !== null && data.price !== undefined ? this.formatPrice(Number(data.price), data.currency || 'USD') : 'Not found'}</div>
                         <div><span class="lab-label">Currency:</span> ${data.currency || 'n/a'}</div>
-                        <div><span class="lab-label">Confidence:</span> ${data.confidence ? Math.round(data.confidence) : 'n/a'}</div>
+                        <div><span class="lab-label">Confidence:</span> ${this.formatConfidence(data.confidence)}</div>
                         <div><span class="lab-label">Source:</span> ${data.source || 'n/a'}</div>
                         <div><span class="lab-label">Stock:</span> ${data.availability?.status || 'unknown'}</div>
+                        <div><span class="lab-label">Stock Confidence:</span> ${this.formatConfidence(data.availability?.confidence)}</div>
                         <div><span class="lab-label">Selector Used:</span> ${data.selectorUsed || 'none'}</div>
                         <div class="lab-title"><span class="lab-label">Title:</span> ${data.title || 'n/a'}</div>
+                        <div class="lab-title"><span class="lab-label">Stock Reason:</span> ${this.escapeHtml(data.availability?.reason || 'n/a')}</div>
+                        <div class="lab-title"><span class="lab-label">Stock Source:</span> ${this.escapeHtml(data.availability?.source || 'n/a')}</div>
+                        <div class="lab-title"><span class="lab-label">Debug:</span> <code>${this.escapeHtml(JSON.stringify(data.debug || {}, null, 0))}</code></div>
                     </div>
                     <div class="lab-suggest-wrap">
                         <div class="lab-label" style="margin-bottom:0.4rem;">Suggestions</div>
@@ -1982,12 +2019,12 @@ class App {
         header.className = 'list-header';
         header.innerHTML = `
             <div onclick="app.handleHeaderClick('name')">Product Name ${this.getSortIcon('name')}</div>
-            <div style="cursor: default;">List</div>
+            <div onclick="app.handleHeaderClick('list')">List ${this.getSortIcon('list')}</div>
             <div onclick="app.handleHeaderClick('price')">Price ${this.getSortIcon('price')}</div>
             <div style="cursor: default;">History</div>
             <div onclick="app.handleHeaderClick('discount')">Trend ${this.getSortIcon('discount')}</div>
-            <div style="cursor: default;">Confidence</div>
-            <div style="cursor: default;">Status</div>
+            <div onclick="app.handleHeaderClick('confidence')">Confidence ${this.getSortIcon('confidence')}</div>
+            <div onclick="app.handleHeaderClick('status')">Status ${this.getSortIcon('status')}</div>
             <div onclick="app.handleHeaderClick('checked')">Last Check ${this.getSortIcon('checked')}</div>
             <div style="cursor: default;">Actions</div>
         `;
@@ -2529,7 +2566,7 @@ class App {
                 const currency = data.currency || this.getCurrency(item);
                 priceVal.textContent = this.formatPrice(Number(data.price), currency);
                 priceVal.style.color = 'var(--success)';
-                const confidence = data.confidence ? `Confidence: ${Math.round(Number(data.confidence))}` : 'Confidence: n/a';
+                const confidence = `Confidence: ${this.formatConfidence(data.confidence)}`;
                 const source = data.source ? ` | Source: ${data.source}` : '';
                 const selectorUsed = data.selectorUsed ? ` | Used: ${data.selectorUsed}` : '';
                 if (metaVal) metaVal.textContent = `${confidence}${source}${selectorUsed}`;
@@ -2703,27 +2740,27 @@ class TooltipManager {
         this.activeElement = null;
         this.mouseX = 0;
         this.mouseY = 0;
+        this.showDelayMs = 1000;
+        this.showTimer = null;
 
-        // Track mouse globally
-        document.body.addEventListener('mousemove', (e) => {
-            this.mouseX = e.clientX;
-            this.mouseY = e.clientY;
-
-            if (this.activeElement && this.tooltip.classList.contains('visible')) {
-                this.updatePosition();
-            }
-        });
-
-        // Delegate events to document body
-        document.body.addEventListener('mouseover', this.handleMouseOver.bind(this));
+        document.body.addEventListener('mousemove', this.handleMouseMove.bind(this));
         document.body.addEventListener('mouseout', this.handleMouseOut.bind(this));
+        window.addEventListener('scroll', () => this.resetTooltip(), { passive: true });
+        window.addEventListener('blur', () => this.resetTooltip());
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.resetTooltip();
+        });
     }
 
-    handleMouseOver(e) {
+    handleMouseMove(e) {
         this.mouseX = e.clientX;
         this.mouseY = e.clientY;
         const target = e.target.closest('[title], [data-tooltip]');
-        if (!target) return;
+
+        if (!target) {
+            this.resetTooltip();
+            return;
+        }
 
         if (target.hasAttribute('title')) {
             const text = target.getAttribute('title');
@@ -2734,19 +2771,38 @@ class TooltipManager {
         }
 
         const text = target.getAttribute('data-tooltip');
-        if (!text) return;
+        if (!text) {
+            this.resetTooltip();
+            return;
+        }
 
-        this.activeElement = target;
-        this.show(text);
+        if (this.activeElement !== target) {
+            this.resetTooltip();
+            this.activeElement = target;
+            this.showTimer = setTimeout(() => {
+                if (this.activeElement !== target) return;
+                this.show(text);
+            }, this.showDelayMs);
+            return;
+        }
+
+        if (this.tooltip.classList.contains('visible')) {
+            this.updatePosition();
+        }
     }
 
     handleMouseOut(e) {
-        if (this.activeElement && (e.target === this.activeElement || this.activeElement.contains(e.target))) {
-            if (e.relatedTarget && this.activeElement.contains(e.relatedTarget)) {
-                return;
+        if (!this.activeElement) return;
+        if (e.relatedTarget && this.activeElement.contains(e.relatedTarget)) return;
+        if (!e.relatedTarget || !document.body.contains(e.relatedTarget)) {
+            this.resetTooltip();
+            return;
+        }
+        if (e.target === this.activeElement || this.activeElement.contains(e.target)) {
+            const next = e.relatedTarget.closest ? e.relatedTarget.closest('[title], [data-tooltip]') : null;
+            if (next !== this.activeElement) {
+                this.resetTooltip();
             }
-            this.hide();
-            this.activeElement = null;
         }
     }
 
@@ -2758,6 +2814,15 @@ class TooltipManager {
 
     hide() {
         this.tooltip.classList.remove('visible');
+    }
+
+    resetTooltip() {
+        if (this.showTimer) {
+            clearTimeout(this.showTimer);
+            this.showTimer = null;
+        }
+        this.hide();
+        this.activeElement = null;
     }
 
     updatePosition() {

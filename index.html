@@ -233,9 +233,9 @@
                 <h2>Extractor Lab</h2>
                 <p class="lab-subtitle">Test a URL and inspect extraction confidence, selected source, and selector suggestions.</p>
                 <div class="lab-controls">
-                    <input type="text" id="labUrlInput" placeholder="https://example.com/product-page">
-                    <input type="text" id="labSelectorInput" placeholder="Optional selector (e.g. .price)">
-                    <button class="primary" id="labRunBtn" onclick="app.runExtractorLab()">Run Extraction</button>
+                    <input type="text" id="labUrlInput" placeholder="https://example.com/product-page" title="Enter the product URL you want to inspect.">
+                    <input type="text" id="labSelectorInput" placeholder="Optional selector (e.g. .price)" title="Optional CSS selector to force a specific price element.">
+                    <button class="primary" id="labRunBtn" onclick="app.runExtractorLab()" title="Run extraction diagnostics for this URL.">Run Extraction</button>
                 </div>
                 <div id="labResult" class="lab-result"></div>
             </div>
