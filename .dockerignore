@@ -1,0 +1,10 @@
+node_modules
+server/node_modules
+backups/*.json
+prices.json
+settings.json
+.git
+.gitignore
+.env
+*.bat
+*.sh

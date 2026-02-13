@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Centsible</title>
+    <link rel="stylesheet" href="style.css?v=20260213-8">
+</head>
+
+<body>
+
+    <div class="container">
+        <header id="mainHeader">
+            <div class="header-left">
+                <div class="header-brand" id="menuTrigger" title="Tools & Backups">
+                    <div class="menu-icon">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5"
+                            viewBox="0 0 24 24">
+                            <path d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                    </div>
+                    <h1>Centsible</h1>
+                </div>
+                <div class="server-status-pill">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Server Online</span>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="commandPaletteBtn" title="Open Command Palette (Ctrl/Cmd+K)">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                        viewBox="0 0 24 24">
+                        <path d="M7 8l5 4-5 4V8zM13 16h4" />
+                    </svg>
+                    Command
+                </button>
+                <button onclick="app.showListsModal()" id="manageListsBtn" title="Manage Lists">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                        viewBox="0 0 24 24">
+                        <path d="M4 7h16M4 12h16M4 17h10" />
+                    </svg>
+                    Manage Lists
+                </button>
+                <button onclick="app.refreshAll()" id="refreshAllBtn" title="Refresh All">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"
+                        viewBox="0 0 24 24">
+                        <path
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Refresh All
+                </button>
+            </div>
+
+            <!-- Elegant Dropdown Menu -->
+            <div class="header-menu" id="headerMenu">
+                <div class="menu-inner">
+                    <div class="menu-section">
+                        <div class="menu-label">Navigate</div>
+                        <button class="menu-item" onclick="app.switchViewFromMenu('portfolio')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M3 12h18M3 7h18M3 17h18" />
+                            </svg>
+                            Portfolio
+                        </button>
+                        <button class="menu-item" onclick="app.switchViewFromMenu('alerts')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M12 2l2.5 5 5.5.8-4 3.9.9 5.4L12 14.8 7.1 17l.9-5.4-4-3.9 5.5-.8L12 2z" />
+                            </svg>
+                            Alerts
+                        </button>
+                        <button class="menu-item" onclick="app.switchViewFromMenu('extractor')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M9 3h6M10 3v4l-5 8a3 3 0 0 0 2.6 4.5h8.8A3 3 0 0 0 19 15l-5-8V3" />
+                            </svg>
+                            Extractor Lab
+                        </button>
+                    </div>
+                    <div class="menu-section">
+                        <div class="menu-label">Data Management</div>
+                        <button class="menu-item" onclick="app.exportToJSON()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                            </svg>
+                            Export JSON
+                        </button>
+                        <button class="menu-item" onclick="app.exportToCSV()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path
+                                    d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            Export CSV
+                        </button>
+                        <button class="menu-item" onclick="document.getElementById('importInput').click()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                            Import Data
+                            <input type="file" id="importInput" style="display:none" accept=".json"
+                                onchange="app.handleImport(event)">
+                        </button>
+                    </div>
+                    <div class="menu-section">
+                        <div class="menu-label">System</div>
+                        <button class="menu-item" onclick="app.showListsModal()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M4 7h16M4 12h16M4 17h10" />
+                            </svg>
+                            Manage Lists
+                        </button>
+                        <button class="menu-item" onclick="app.showBackupsModal()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M12 8v4l3 2m6-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Manage Backups
+                        </button>
+                        <button class="menu-item" onclick="app.showSettingsModal()">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path
+                                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296-.07 2.572-1.065z" />
+                                <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                            Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="dashboard-metrics">
+            <div class="metric-card">
+                <div class="metric-label" title="Number of items currently shown in the selected list filter.">Tracked</div>
+                <div class="metric-value" id="metricTracked">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" title="Items whose current price is at or below the target price.">Target Hits</div>
+                <div class="metric-value" id="metricTargetHits">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" title="Items whose extraction confidence is below your alert rule threshold.">Low Confidence</div>
+                <div class="metric-value" id="metricLowConfidence">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" title="Items not successfully checked within your stale-hours alert threshold.">Stale Items</div>
+                <div class="metric-value" id="metricStale">0</div>
+            </div>
+        </div>
+
+        <div id="portfolioPanel" class="dashboard-panel active">
+            <div class="input-group">
+                <input type="text" id="urlInput" placeholder="Product URL"
+                    title="Enter the direct link to the product page.">
+                <input type="text" id="nameInput" placeholder="Name (Optional)" style="flex-grow: 0.3;"
+                    title="Give this item a custom name for your list.">
+                <input type="number" id="targetPriceInput" placeholder="Target Price (Optional)" style="flex-grow: 0.15;"
+                    title="Set a goal price. You'll get a highlighted alert when the price hits this target.">
+                <input type="text" id="selectorInput" list="selector-history" placeholder="Selector / ID (Optional)"
+                    style="flex-grow: 0.15;" title="Specific CSS Selector or ID to find the price element.">
+                <datalist id="selector-history"></datalist>
+                <button class="primary" onclick="app.addItem()" id="addBtn" title="Add to tracking list">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Item
+                </button>
+            </div>
+            <div class="grid" id="productGrid">
+                <!-- Items will be injected here -->
+            </div>
+        </div>
+
+        <div id="alertsPanel" class="dashboard-panel">
+            <div class="panel-card" style="margin-bottom: 0.8rem;">
+                <h2>Alert Rules</h2>
+                <div class="rules-grid">
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="ruleTargetHit"> Target hit</label>
+                    </div>
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="rulePriceDrop"> Any price drop</label>
+                    </div>
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="ruleDrop24h"> 24h drop %</label>
+                        <input type="number" id="ruleDrop24hPct" min="1" step="0.5" placeholder="Threshold %">
+                    </div>
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="ruleAllTimeLow"> New all-time low</label>
+                    </div>
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="ruleLowConfidence"> Low confidence</label>
+                        <input type="number" id="ruleLowConfidenceThreshold" min="1" max="100" step="1" placeholder="Confidence threshold">
+                    </div>
+                    <div class="rule-row">
+                        <label><input type="checkbox" id="ruleStale"> Stale checks</label>
+                        <input type="number" id="ruleStaleHours" min="1" step="1" placeholder="Stale after hours">
+                    </div>
+                    <div class="rule-row">
+                        <label>Alert cooldown</label>
+                        <input type="number" id="ruleCooldownMinutes" min="1" step="1" placeholder="Cooldown minutes">
+                    </div>
+                </div>
+                <div style="margin-top:0.75rem;">
+                    <button class="primary" onclick="app.saveAlertRules()">Save Alert Rules</button>
+                </div>
+            </div>
+
+            <div class="panel-card" style="margin-bottom: 0.8rem;">
+                <h2>Action Queue</h2>
+                <div id="alertsList" class="alerts-list"></div>
+            </div>
+
+            <div class="panel-card">
+                <div class="panel-head">
+                    <h2>Diagnostics Log</h2>
+                    <button onclick="app.clearDiagnostics()" title="Delete diagnostics history">Clear</button>
+                </div>
+                <div id="diagnosticsList" class="diagnostics-list"></div>
+            </div>
+        </div>
+
+        <div id="extractorPanel" class="dashboard-panel">
+            <div class="panel-card">
+                <h2>Extractor Lab</h2>
+                <p class="lab-subtitle">Test a URL and inspect extraction confidence, selected source, and selector suggestions.</p>
+                <div class="lab-controls">
+                    <input type="text" id="labUrlInput" placeholder="https://example.com/product-page">
+                    <input type="text" id="labSelectorInput" placeholder="Optional selector (e.g. .price)">
+                    <button class="primary" id="labRunBtn" onclick="app.runExtractorLab()">Run Extraction</button>
+                </div>
+                <div id="labResult" class="lab-result"></div>
+            </div>
+        </div>
+
+        <div id="toast" class="toast"></div>
+
+        <!-- History Modal -->
+        <div class="modal" id="historyModal">
+            <div class="modal-overlay" style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="modal-content-history">
+                <div class="modal-header-history">
+                    <h2 id="historyModalTitle">History</h2>
+                    <button class="modal-close-button">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <div id="historyModalBody"></div>
+                    <div id="historyModalChart" class="modal-body-chart"></div>
+                    <div
+                        style="font-size: 0.75rem; color: var(--text-muted); text-align: center; margin-top: 1rem; opacity: 0.7;">
+                        Hover over the chart to see price details.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Backups Modal -->
+        <div id="backupsModal" class="modal">
+            <div class="modal-content history-modal">
+                <div class="modal-header-history">
+                    <h2 id="backupsModalTitle">System Backups</h2>
+                    <button class="modal-close-button" onclick="app.closeBackupsModal()">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <div id="backupsList" class="backups-list">
+                        <!-- Backups go here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- Settings Modal -->
+        <div id="settingsModal" class="modal">
+            <div class="modal-overlay" onclick="app.closeSettingsModal()"
+                style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="modal-content history-modal" style="max-width: 500px;">
+                <div class="modal-header-history">
+                    <h2>Notifications Settings</h2>
+                    <button class="modal-close-button" onclick="app.closeSettingsModal()">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.5rem;">
+                        Configure external webhooks to receive price alerts on Discord or Telegram.
+                    </p>
+
+                    <div class="settings-group">
+                        <label>Discord Webhook URL</label>
+                        <input type="text" id="discordWebhookInput" placeholder="https://discord.com/api/webhooks/...">
+                    </div>
+
+                    <div class="settings-group">
+                        <label>Telegram Bot Token</label>
+                        <input type="text" id="telegramWebhookInput" placeholder="123456:ABC-DEF...">
+                    </div>
+
+                    <div class="settings-group">
+                        <label>Telegram Chat ID</label>
+                        <input type="text" id="telegramChatIdInput" placeholder="e.g. 987654321">
+                    </div>
+
+                    <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                        <button class="primary" style="flex: 1;" onclick="app.saveSettings()">Save Settings</button>
+                        <button style="flex: 1;" onclick="app.testNotification('target')">Test Notification</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Doctor Modal -->
+        <div id="doctorModal" class="modal">
+            <div class="modal-overlay" onclick="app.closeDoctorModal()"
+                style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="modal-content history-modal" style="max-width: 600px;">
+                <div class="modal-header-history">
+                    <h2>Edit Item</h2>
+                    <button class="modal-close-button" onclick="app.closeDoctorModal()">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <p id="doctorProductName" style="font-weight: 600; color: var(--accent); margin-bottom: 0.5rem;">
+                    </p>
+                    <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1.5rem;">
+                        Update name/URL and verify selector extraction before saving.
+                    </p>
+
+                    <div class="settings-group">
+                        <label>Name</label>
+                        <input type="text" id="doctorNameInput" placeholder="Item name">
+                    </div>
+
+                    <div class="settings-group">
+                        <label>URL</label>
+                        <input type="text" id="doctorUrlInput" placeholder="https://example.com/product-page">
+                    </div>
+
+                    <div class="settings-group">
+                        <label>Selector</label>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <input type="text" id="doctorSelectorInput" placeholder="e.g. #price-raw or .product-fiyat"
+                                style="flex: 1; min-width: 0;">
+                            <button onclick="app.testDoctorSelector()" id="testDoctorBtn">Verify</button>
+                        </div>
+                    </div>
+
+                    <div id="doctorResults"
+                        style="margin-top: 1.5rem; padding: 1rem; background: rgba(0,0,0,0.2); border-radius: 0.5rem; display: none;">
+                        <div style="font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted);">Test Result
+                        </div>
+                        <div id="doctorPriceValue" style="font-size: 1.5rem; font-weight: 600; margin-top: 0.25rem;">
+                        </div>
+                        <div id="doctorMetaValue" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">
+                        </div>
+                        <div id="doctorSuggestions" style="margin-top: 1rem;">
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 2rem;">
+                        <button class="primary" style="width: 100%;" onclick="app.updateDoctorSelector()">Apply & Keep
+                            History</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lists Manager Modal -->
+        <div id="listsModal" class="modal">
+            <div class="modal-overlay" onclick="app.closeListsModal()"
+                style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="modal-content history-modal" style="max-width: 680px;">
+                <div class="modal-header-history">
+                    <h2>Lists Manager</h2>
+                    <button class="modal-close-button" onclick="app.closeListsModal()">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <div class="list-manager-create">
+                        <input type="text" id="newListNameInput" placeholder="Create new list (e.g. Currency)">
+                        <button class="primary" onclick="app.createListFromModal()">Create</button>
+                    </div>
+                    <div id="listsManagerBody" class="lists-manager-body"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Command Palette -->
+        <div id="commandPalette" class="modal">
+            <div class="modal-overlay" onclick="app.closeCommandPalette()"
+                style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="command-palette-shell">
+                <div class="command-header">
+                    <input type="text" id="commandInput" placeholder="Type a command or item name...">
+                    <span class="command-hint">Enter</span>
+                </div>
+                <div id="commandResults" class="command-results"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js?v=20260213-8"></script>
+</body>
+
+</html>

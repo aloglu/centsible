@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  price-tracker:
+    build: .
+    container_name: price-tracker
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persistent storage for your prices, settings, and backups
+      - ./prices.json:/app/prices.json
+      - ./settings.json:/app/settings.json
+      - ./backups:/app/backups
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Istanbul # Set your timezone
