@@ -56,15 +56,6 @@ The following environment variables can be set in the `.env` file:
 | `ALLOWED_ORIGINS` | CORS allowed origins (comma-separated). Leave empty to allow all origins. | empty |
 | `FETCH_ALLOWED_HOSTS` | Whitelisted hostnames for tracking | - |
 
-### Unraid / LAN CORS setup
-
-If the UI is opened from another host (for example `http://192.168.1.50:3000`), set `ALLOWED_ORIGINS` to that exact origin (or origins), separated by commas.
-
-Examples:
-
-- `ALLOWED_ORIGINS=http://192.168.1.50:3000`
-- `ALLOWED_ORIGINS=http://192.168.1.50:3000,http://localhost:3000`
-
 ## Custom Selectors
 
 If the automated extractor fails on a specific site, use the **Extractor Lab** to provide a custom CSS selector. Once verified, the application will use that selector for future checks of that item.
