@@ -25,14 +25,24 @@ const DIAGNOSTICS_FILE = path.join(__dirname, '../diagnostics.json');
 const BACKUP_DIR = path.join(__dirname, '../backups');
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const DISCORD_PROXY_BASE = (process.env.DISCORD_PROXY_BASE || '').trim();
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || `http://localhost:${PORT},http://127.0.0.1:${PORT}`)
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
-    .map(origin => origin.trim())
+    .map(origin => normalizeOrigin(origin))
     .filter(Boolean);
+const hasExplicitCorsAllowlist = allowedOrigins.length > 0;
 const FETCH_ALLOWED_HOSTS = (process.env.FETCH_ALLOWED_HOSTS || '')
     .split(',')
     .map(host => host.trim().toLowerCase())
     .filter(Boolean);
+
+function normalizeOrigin(origin) {
+    if (!origin) return '';
+    try {
+        return new URL(origin).origin.toLowerCase();
+    } catch (_) {
+        return String(origin).trim().replace(/\/+$/, '').toLowerCase();
+    }
+}
 
 // Currencies support (relative to USD base, populated by live refresh)
 let exchangeRates = {
@@ -239,10 +249,12 @@ async function readBackupSummary(filename) {
 // Middleware
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
+        const normalizedOrigin = normalizeOrigin(origin);
+        if (!origin || !hasExplicitCorsAllowlist || allowedOrigins.includes(normalizedOrigin)) {
             callback(null, true);
             return;
         }
+        console.warn(`[CORS] Blocked origin: ${origin}`);
         callback(new Error('CORS blocked for this origin'));
     }
 }));
@@ -1808,6 +1820,11 @@ app.get('/api/fetch', async (req, res) => {
     setInterval(() => performBackup(), 24 * 60 * 60 * 1000);
 
     const server = app.listen(PORT, () => {
+        if (hasExplicitCorsAllowlist) {
+            console.log(`[CORS] Restricted mode. Allowed origins: ${allowedOrigins.join(', ')}`);
+        } else {
+            console.log('[CORS] Open mode. Set ALLOWED_ORIGINS to enforce an origin allowlist.');
+        }
         console.log(`
 Price Tracker Server (with Persistence) running on http://localhost:${PORT}
 -------------------------------------------------------
