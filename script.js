@@ -1,3 +1,6 @@
+/**
+ * Simple SVG Chart Generator
+ */
 class Sparkline {
     static generate(historyObject, width = 300, height = 60, color = '#38bdf8', itemId = '') {
         if (!historyObject || historyObject.length < 2) return { html: '', data: null };
@@ -2348,7 +2351,7 @@ class App {
         const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(this.items, null, 2));
         const anchor = document.createElement('a');
         anchor.setAttribute("href", dataStr);
-        anchor.setAttribute("download", `price_tracker_export_${new Date().toISOString().split('T')[0]}.json`);
+        anchor.setAttribute("download", `centsible_export_${new Date().toISOString().split('T')[0]}.json`);
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
@@ -2376,7 +2379,7 @@ class App {
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `price_tracker_export_${new Date().toISOString().split('T')[0]}.csv`);
+        link.setAttribute("download", `centsible_export_${new Date().toISOString().split('T')[0]}.csv`);
         document.body.appendChild(link);
         link.click();
         link.remove();

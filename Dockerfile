@@ -4,7 +4,6 @@ FROM ghcr.io/puppeteer/puppeteer:latest
 # Set environment variables
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 # Switch to root to install dependencies and set up permissions
 USER root

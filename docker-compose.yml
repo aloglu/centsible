@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  price-tracker:
+  centsible:
     build: .
-    container_name: price-tracker
+    container_name: centsible
     ports:
       - "3000:3000"
     volumes:

@@ -44,6 +44,23 @@ function normalizeOrigin(origin) {
     }
 }
 
+function resolveBrowserExecutablePath() {
+    const candidates = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium'
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+        try {
+            if (fs.existsSync(candidate)) return candidate;
+        } catch (_) { }
+    }
+    return undefined;
+}
+
 // Currencies support (relative to USD base, populated by live refresh)
 let exchangeRates = {
     USD: 1,
@@ -1071,11 +1088,21 @@ async function getBrowser() {
     }
 
     console.log('Launching new Puppeteer instance...');
+    const executablePath = resolveBrowserExecutablePath();
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && !executablePath) {
+        console.warn(`[Browser] Configured PUPPETEER_EXECUTABLE_PATH not found: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
+    }
+    if (executablePath) {
+        console.log(`[Browser] Using executable: ${executablePath}`);
+    } else {
+        console.log('[Browser] Using Puppeteer default browser resolution.');
+    }
     browserInstance = await puppeteer.launch({
         headless: "new",
         handleSIGINT: false,
         handleSIGTERM: false,
         handleSIGHUP: false,
+        ...(executablePath ? { executablePath } : {}),
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -1826,7 +1853,7 @@ app.get('/api/fetch', async (req, res) => {
             console.log('[CORS] Open mode. Set ALLOWED_ORIGINS to enforce an origin allowlist.');
         }
         console.log(`
-Price Tracker Server (with Persistence) running on http://localhost:${PORT}
+Centsible Server (with Persistence) running on http://localhost:${PORT}
 -------------------------------------------------------
 Background checks running every ${CHECK_INTERVAL_MS / 60000} minutes.
         `);
