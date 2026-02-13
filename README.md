@@ -53,8 +53,17 @@ The following environment variables can be set in the `.env` file:
 | `DISCORD_PROXY_BASE` | Optional proxy base for Discord webhooks | - |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token | - |
 | `TELEGRAM_CHAT_ID` | Telegram Chat ID | - |
-| `ALLOWED_ORIGINS` | CORS allowed origins | `http://localhost:3000` |
+| `ALLOWED_ORIGINS` | CORS allowed origins (comma-separated). Leave empty to allow all origins. | empty |
 | `FETCH_ALLOWED_HOSTS` | Whitelisted hostnames for tracking | - |
+
+### Unraid / LAN CORS setup
+
+If the UI is opened from another host (for example `http://192.168.1.50:3000`), set `ALLOWED_ORIGINS` to that exact origin (or origins), separated by commas.
+
+Examples:
+
+- `ALLOWED_ORIGINS=http://192.168.1.50:3000`
+- `ALLOWED_ORIGINS=http://192.168.1.50:3000,http://localhost:3000`
 
 ## Custom Selectors
 
@@ -66,4 +75,4 @@ Database state is stored in `prices.json`. Scheduled backups are saved to the `b
 
 ## License
 
-Released under the [MIT License](https://github.com/aloglu/centsible/blob/main/LICENSE).
+[MIT](https://github.com/aloglu/centsible/blob/main/LICENSE)
