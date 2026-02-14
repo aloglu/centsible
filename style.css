@@ -283,6 +283,122 @@ header {
     padding: 0 0.95rem;
 }
 
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.check-interval-control {
+    display: flex;
+    align-items: center;
+    position: relative;
+}
+
+.custom-select {
+    position: relative;
+}
+
+.custom-select-trigger {
+    min-height: 38px;
+    padding: 0 0.75rem 0 0.9rem;
+    min-width: 128px;
+    border-radius: 0.375rem;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-main);
+    font-size: 0.875rem;
+    font-weight: 500;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+}
+
+.custom-select-trigger:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--text-muted);
+}
+
+.custom-select-trigger:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.custom-select-menu {
+    position: absolute;
+    top: calc(100% + 0.35rem);
+    left: 0;
+    min-width: 100%;
+    background: rgba(18, 18, 21, 0.98);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--border);
+    border-top: 1px solid var(--border-highlight);
+    border-radius: 0.5rem;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.45);
+    z-index: 1200;
+    display: none;
+    padding: 0.3rem;
+}
+
+.custom-select-menu.active {
+    display: block;
+}
+
+.custom-select-option {
+    width: 100%;
+    justify-content: flex-start;
+    border: none;
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--text-main);
+    padding: 0.5rem 0.65rem;
+    font-size: 0.85rem;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+}
+
+.custom-select-option:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--accent);
+}
+
+.modal-select .custom-select-trigger {
+    width: 100%;
+    min-width: 0;
+    min-height: auto;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.modal-select .custom-select-menu {
+    right: 0;
+    width: 100%;
+    min-width: 100%;
+    z-index: 3000;
+}
+
+.modal-select {
+    z-index: 2;
+}
+
+#customIntervalModal .history-modal {
+    overflow: visible;
+}
+
+#customIntervalModal .modal-body-history {
+    overflow: visible;
+}
+
 button {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--border);
@@ -360,8 +476,7 @@ button.primary:hover {
     color: var(--text-main);
 }
 
-/* Inputs */
-/* Inputs */
+/* Form inputs and controls */
 .input-group {
     display: flex;
     /* keep flex */
@@ -495,6 +610,12 @@ input[type="number"] {
 .panel-card h2 {
     font-size: 1rem;
     margin-bottom: 0.6rem;
+}
+
+.alerts-subtitle {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-bottom: 0.7rem;
 }
 
 .list-toolbar {
@@ -723,9 +844,19 @@ input[type="number"] {
     border-left: 4px solid var(--text-muted);
     border-radius: 0.55rem;
     padding: 0.75rem 0.8rem;
-    font-size: 0.9rem;
     background: rgba(255, 255, 255, 0.02);
     cursor: pointer;
+}
+
+.alert-title {
+    font-size: 0.86rem;
+    color: var(--text-main);
+}
+
+.alert-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-top: 0.2rem;
 }
 
 .alert-row.critical {
@@ -800,8 +931,7 @@ input[type="number"] {
     pointer-events: all;
 }
 
-/* History Modal Specifics */
-/* History Modal Specifics */
+/* Shared modal card shell used by history/backups/settings/doctor/lists/custom interval */
 #historyModal .modal-content-history,
 .history-modal {
     background: #09090b;
@@ -827,6 +957,7 @@ input[type="number"] {
 #historyModal.active .modal-content-history,
 #backupsModal.active .history-modal,
 #settingsModal.active .history-modal,
+#customIntervalModal.active .history-modal,
 #doctorModal.active .history-modal,
 #listsModal.active .history-modal {
     transform: translateY(0) scale(1);
@@ -1312,8 +1443,7 @@ input[type="number"] {
     /* For tooltip positioning */
 }
 
-/* Universal Custom Tooltip */
-/* Universal Custom Tooltip */
+/* Universal custom tooltip */
 .custom-tooltip-container {
     position: fixed;
     background: #09090b;
@@ -1658,6 +1788,18 @@ input[type="number"] {
         flex-direction: column;
     }
 
+    .check-interval-control {
+        width: 100%;
+    }
+
+    .check-interval-control .custom-select-trigger {
+        width: 100%;
+    }
+
+    .interval-input-row {
+        grid-template-columns: 1fr;
+    }
+
     .input-group input,
     .input-group button,
     .input-group select {
@@ -1969,6 +2111,12 @@ input[type="number"] {
     outline: none;
     border-color: var(--accent);
     background: rgba(255, 255, 255, 0.08);
+}
+
+.interval-input-row {
+    display: grid;
+    grid-template-columns: 1fr 160px;
+    gap: 0.6rem;
 }
 
 /* Value Badges */

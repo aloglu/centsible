@@ -1,1 +1,25 @@
-{"discordWebhook":"","telegramWebhook":"","telegramChatId":"","lists":[{"id":"default","name":"Default"}],"alertRules":{"targetHitEnabled":true,"priceDropEnabled":true,"priceDrop24hEnabled":true,"priceDrop24hPercent":5,"allTimeLowEnabled":true,"lowConfidenceEnabled":true,"lowConfidenceThreshold":55,"staleEnabled":true,"staleHours":12,"notifyCooldownMinutes":240}}
+{
+  "discordWebhook": "",
+  "telegramWebhook": "",
+  "telegramChatId": "",
+  "lists": [
+    {
+      "id": "default",
+      "name": "Default"
+    }
+  ],
+  "alertRules": {
+    "targetHitEnabled": true,
+    "priceDropEnabled": true,
+    "priceDrop24hEnabled": true,
+    "priceDrop24hPercent": 3,
+    "allTimeLowEnabled": true,
+    "lowConfidenceEnabled": true,
+    "lowConfidenceThreshold": 60,
+    "staleEnabled": true,
+    "staleHours": 10,
+    "notifyCooldownMinutes": 120
+  },
+  "checkIntervalMs": 1800000,
+  "checkIntervalPreset": "30m"
+}

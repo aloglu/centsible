@@ -289,6 +289,7 @@ class Scraper {
  */
 class App {
     constructor() {
+        // Primary client-side state. Replaced/updated from backend on polling and user actions.
         this.items = [];
         this.selectorHistory = [];
         this.sortMethod = 'name_asc';
@@ -334,9 +335,11 @@ class App {
         this.settings = {
             discordWebhook: '',
             telegramWebhook: '',
-            telegramChatId: ''
+            telegramChatId: '',
+            // Fallback defaults before `/api/settings` is loaded.
+            checkIntervalMs: 60 * 60 * 1000,
+            checkIntervalPreset: '1h'
         };
-        this.loadSettings();
 
         this.init();
     }
@@ -345,6 +348,7 @@ class App {
         this.setupInputs();
         this.loadUiPreferences();
         await Promise.all([
+            this.loadSettings(),
             this.loadFromServer(),
             this.fetchRates(),
             this.loadLists(),
@@ -356,6 +360,7 @@ class App {
         this.renderSelectors();
         this.renderListControls();
         this.fillAlertRulesForm();
+        this.syncCheckIntervalUI();
 
         // Poll server status every 10 seconds
         setInterval(() => this.updateServerStatus(), 10000);
@@ -398,6 +403,7 @@ class App {
                 this.closeHistoryModal();
                 this.closeDoctorModal();
                 this.closeSettingsModal();
+                this.closeCustomIntervalModal();
                 this.closeListsModal();
                 this.closeCommandPalette();
             }
@@ -519,6 +525,7 @@ class App {
     // --- Server Communications ---
 
     getItemsSignature(items) {
+        // Compact fingerprint used to decide whether UI rows need a full re-render.
         if (!Array.isArray(items)) return '';
         return items.map(item => {
             const lastHist = item.history && item.history.length ? item.history[item.history.length - 1] : null;
@@ -567,6 +574,7 @@ class App {
             const nextSignature = this.getItemsSignature(incomingItems);
             const changed = currentSignature !== nextSignature;
 
+            // Backend remains source-of-truth; UI state is a projection of this array.
             this.items = incomingItems;
 
             this.selectorHistory = [];
@@ -672,10 +680,205 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/settings`);
             if (res.ok) {
                 this.settings = { ...this.settings, ...(await res.json()) };
+                this.syncCheckIntervalUI();
             }
         } catch (e) {
             console.error('Settings load failed:', e);
         }
+    }
+
+    getCheckIntervalPresets() {
+        return [
+            { value: '15m', label: '15 mins', ms: 15 * 60 * 1000 },
+            { value: '30m', label: '30 mins', ms: 30 * 60 * 1000 },
+            { value: '1h', label: '1 hour', ms: 60 * 60 * 1000 },
+            { value: '3h', label: '3 hours', ms: 3 * 60 * 60 * 1000 },
+            { value: '6h', label: '6 hours', ms: 6 * 60 * 60 * 1000 },
+            { value: '12h', label: '12 hours', ms: 12 * 60 * 60 * 1000 },
+            { value: '24h', label: '24 hours', ms: 24 * 60 * 60 * 1000 }
+        ];
+    }
+
+    getCheckIntervalMs() {
+        const ms = Number(this.settings?.checkIntervalMs);
+        return Number.isFinite(ms) && ms > 0 ? ms : (60 * 60 * 1000);
+    }
+
+    getPresetForInterval(ms) {
+        const preset = this.getCheckIntervalPresets().find(p => p.ms === ms);
+        return preset ? preset.value : 'custom';
+    }
+
+    formatCheckInterval(ms) {
+        const minutes = Math.round(ms / 60000);
+        if (minutes % 1440 === 0) {
+            const days = minutes / 1440;
+            return `${days} day${days === 1 ? '' : 's'}`;
+        }
+        if (minutes % 60 === 0) {
+            const hours = minutes / 60;
+            return `${hours} hour${hours === 1 ? '' : 's'}`;
+        }
+        return `${minutes} min`;
+    }
+
+    syncCheckIntervalUI() {
+        const ms = this.getCheckIntervalMs();
+        const trigger = document.getElementById('checkIntervalTrigger');
+        if (trigger) {
+            trigger.title = `Background checks every ${this.formatCheckInterval(ms)}`;
+        }
+    }
+
+    getCustomIntervalModalValue(ms) {
+        const minutes = Math.round(ms / 60000);
+        if (minutes % 1440 === 0) {
+            return { value: String(minutes / 1440), unit: 'days' };
+        }
+        if (minutes % 60 === 0) {
+            return { value: String(minutes / 60), unit: 'hours' };
+        }
+        return { value: String(minutes), unit: 'minutes' };
+    }
+
+    async handleCheckIntervalChange(value) {
+        if (!value) return;
+        if (value === 'custom') {
+            this.showCustomIntervalModal();
+            return;
+        }
+        const preset = this.getCheckIntervalPresets().find(p => p.value === value);
+        if (!preset) return;
+        await this.saveCheckInterval(preset.ms, preset.value);
+    }
+
+    async saveCheckInterval(intervalMs, preset = 'custom') {
+        const ms = Number(intervalMs);
+        const minMs = 60 * 1000;
+        const maxMs = 30 * 24 * 60 * 60 * 1000;
+        if (!Number.isFinite(ms) || ms < minMs || ms > maxMs) {
+            this.showToast('Interval must be between 1 minute and 30 days', 'error');
+            return false;
+        }
+
+        const payload = {
+            checkIntervalMs: Math.round(ms),
+            checkIntervalPreset: preset
+        };
+
+        try {
+            const res = await fetch(`${this.SERVER_URL}/settings`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) throw new Error('Request failed');
+
+            this.settings = { ...this.settings, ...payload };
+            this.syncCheckIntervalUI();
+            this.showToast(`Check interval set to ${this.formatCheckInterval(payload.checkIntervalMs)}`, 'success');
+            return true;
+        } catch (e) {
+            console.error('Failed to save check interval:', e);
+            this.showToast('Failed to save check interval', 'error');
+            this.syncCheckIntervalUI();
+            return false;
+        }
+    }
+
+    showCustomIntervalModal() {
+        const header = document.getElementById('mainHeader');
+        if (header) header.classList.remove('menu-open');
+        this.closeIntervalMenu();
+
+        const modal = document.getElementById('customIntervalModal');
+        const valueInput = document.getElementById('customIntervalValue');
+        const unitInput = document.getElementById('customIntervalUnit');
+        const current = this.getCustomIntervalModalValue(this.getCheckIntervalMs());
+        if (valueInput) {
+            valueInput.value = '';
+            valueInput.placeholder = `Current: ${current.value} ${current.unit}`;
+        }
+        if (unitInput) unitInput.value = current.unit;
+        this.selectCustomIntervalUnit(current.unit, this.getCustomIntervalUnitLabel(current.unit));
+
+        if (modal) {
+            modal.classList.add('active');
+            modal.style.pointerEvents = 'auto';
+        }
+    }
+
+    closeCustomIntervalModal() {
+        const modal = document.getElementById('customIntervalModal');
+        if (modal) {
+            modal.classList.remove('active');
+            modal.style.pointerEvents = 'none';
+        }
+        this.closeCustomIntervalUnitMenu();
+        this.syncCheckIntervalUI();
+    }
+
+    async saveCustomCheckInterval() {
+        const valueInput = document.getElementById('customIntervalValue');
+        const unitInput = document.getElementById('customIntervalUnit');
+        const rawValue = Number(valueInput?.value);
+        const unit = unitInput?.value || 'minutes';
+        if (!Number.isFinite(rawValue) || rawValue <= 0) {
+            this.showToast('Enter a valid positive interval', 'error');
+            return;
+        }
+
+        let intervalMs = rawValue * 60 * 1000;
+        if (unit === 'hours') intervalMs = rawValue * 60 * 60 * 1000;
+        if (unit === 'days') intervalMs = rawValue * 24 * 60 * 60 * 1000;
+
+        const ok = await this.saveCheckInterval(intervalMs, 'custom');
+        if (ok) this.closeCustomIntervalModal();
+    }
+
+    toggleIntervalMenu(event) {
+        if (event) event.stopPropagation();
+        const menu = document.getElementById('checkIntervalMenu');
+        if (!menu) return;
+        this.closeCustomIntervalUnitMenu();
+        menu.classList.toggle('active');
+    }
+
+    closeIntervalMenu() {
+        const menu = document.getElementById('checkIntervalMenu');
+        if (menu) menu.classList.remove('active');
+    }
+
+    selectIntervalOption(value) {
+        this.closeIntervalMenu();
+        this.handleCheckIntervalChange(value);
+    }
+
+    toggleCustomIntervalUnitMenu(event) {
+        if (event) event.stopPropagation();
+        const menu = document.getElementById('customIntervalUnitMenu');
+        if (!menu) return;
+        this.closeIntervalMenu();
+        menu.classList.toggle('active');
+    }
+
+    closeCustomIntervalUnitMenu() {
+        const menu = document.getElementById('customIntervalUnitMenu');
+        if (menu) menu.classList.remove('active');
+    }
+
+    getCustomIntervalUnitLabel(unit) {
+        if (unit === 'hours') return 'Hour(s)';
+        if (unit === 'days') return 'Day(s)';
+        return 'Minutes';
+    }
+
+    selectCustomIntervalUnit(value, label = null) {
+        const unitInput = document.getElementById('customIntervalUnit');
+        if (unitInput) unitInput.value = value;
+        const triggerLabel = document.getElementById('customIntervalUnitTriggerLabel');
+        if (triggerLabel) triggerLabel.textContent = label || this.getCustomIntervalUnitLabel(value);
+        this.closeCustomIntervalUnitMenu();
     }
 
     async saveSettings() {
@@ -1226,6 +1429,7 @@ class App {
         });
 
         input.addEventListener('keydown', (e) => {
+            // Keyboard-first behavior: arrows navigate, Enter executes highlighted command.
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
                 this.moveCommandSelection(1);
@@ -1245,6 +1449,7 @@ class App {
     }
 
     buildCommandItems(filter = '') {
+        // Build one unified command index from static app actions + dynamic item/list actions.
         const text = String(filter || '').toLowerCase();
         const items = [];
         const base = [
@@ -1317,6 +1522,7 @@ class App {
         const container = document.getElementById('commandResults');
         if (!container) return;
 
+        // Keep list intentionally short so keyboard navigation stays fast and predictable.
         this.commandResults = this.buildCommandItems(filter).slice(0, 12);
         if (!this.commandResults.length) {
             container.innerHTML = '<div class="command-item"><div class="command-title">No commands found</div></div>';
@@ -1340,6 +1546,17 @@ class App {
                 if (cmd) this.executeCommand(cmd);
             });
         });
+
+        this.scrollActiveCommandIntoView();
+    }
+
+    scrollActiveCommandIntoView() {
+        const container = document.getElementById('commandResults');
+        if (!container) return;
+        const active = container.querySelector('.command-item.active');
+        if (!active) return;
+        // Prevent "selection disappeared below fold" when navigating with arrow keys.
+        active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
 
     moveCommandSelection(delta) {
@@ -1916,28 +2133,69 @@ class App {
     renderAlertsPanel() {
         const list = document.getElementById('alertsList');
         if (!list) return;
+        // Action Queue is derived UI data, recalculated from current visible items each render.
         const alerts = [];
         const now = Date.now();
         const rules = this.alertRules || {};
         const items = this.getVisibleItems();
+        const pushAlert = (payload) => {
+            // Normalize timestamp once so sort logic can be simple and consistent.
+            const ts = payload.time ? new Date(payload.time).getTime() : NaN;
+            alerts.push({
+                ...payload,
+                timeMs: Number.isFinite(ts) ? ts : 0
+            });
+        };
         items.forEach(item => {
+            const alertTime = item.lastChecked || item.lastCheckAttempt || null;
+            const listName = this.getListName(item.listId || 'default');
             if (rules.targetHitEnabled && item.stockStatus !== 'out_of_stock' && item.targetPrice && item.currentPrice <= item.targetPrice) {
-                alerts.push({ severity: 'critical', text: `${item.name}: target hit (${this.formatPrice(item.currentPrice, item.currency || 'USD')})`, id: item.id });
+                pushAlert({
+                    severity: 'critical',
+                    title: `${item.name}: target hit`,
+                    meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(item.currentPrice, item.currency || 'USD')}`,
+                    id: item.id,
+                    time: alertTime
+                });
             }
             if (item.stockStatus === 'out_of_stock') {
-                alerts.push({ severity: 'warning', text: `${item.name}: out of stock`, id: item.id });
+                pushAlert({
+                    severity: 'warning',
+                    title: `${item.name}: out of stock`,
+                    meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName}${item.stockReason ? ` | ${item.stockReason}` : ''}`,
+                    id: item.id,
+                    time: alertTime
+                });
             }
             if (rules.staleEnabled && (!item.lastChecked || (now - new Date(item.lastChecked).getTime()) > Number(rules.staleHours || 6) * 3600000)) {
-                alerts.push({ severity: 'warning', text: `${item.name}: stale check`, id: item.id });
+                pushAlert({
+                    severity: 'warning',
+                    title: `${item.name}: stale check`,
+                    meta: `${item.lastChecked ? new Date(item.lastChecked).toLocaleString() : 'Never checked'} | ${listName} | threshold: ${Number(rules.staleHours || 6)}h`,
+                    id: item.id,
+                    time: item.lastChecked || item.lastCheckAttempt || null
+                });
             }
             if (rules.lowConfidenceEnabled && Number(item.extractionConfidence || 0) > 0 && Number(item.extractionConfidence) < Number(rules.lowConfidenceThreshold || 55)) {
-                alerts.push({ severity: 'warning', text: `${item.name}: low extraction confidence (${this.formatConfidence(item.extractionConfidence)})`, id: item.id });
+                pushAlert({
+                    severity: 'warning',
+                    title: `${item.name}: low extraction confidence`,
+                    meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatConfidence(item.extractionConfidence)}`,
+                    id: item.id,
+                    time: alertTime
+                });
             }
             if (rules.allTimeLowEnabled && Array.isArray(item.history) && item.history.length > 2) {
                 const prices = item.history.map(h => Number(h.price)).filter(Number.isFinite);
                 const min = Math.min(...prices);
                 if (Number(item.currentPrice) <= min) {
-                    alerts.push({ severity: 'info', text: `${item.name}: at all-time low`, id: item.id });
+                    pushAlert({
+                        severity: 'info',
+                        title: `${item.name}: at all-time low`,
+                        meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(Number(item.currentPrice), item.currency || 'USD')}`,
+                        id: item.id,
+                        time: alertTime
+                    });
                 }
             }
         });
@@ -1947,8 +2205,18 @@ class App {
             return;
         }
         const priority = { critical: 0, warning: 1, info: 2 };
-        alerts.sort((a, b) => (priority[a.severity] - priority[b.severity]));
-        list.innerHTML = alerts.map(a => `<div class="alert-row ${a.severity}" onclick="app.showHistoryModal('${a.id}')">${a.text}</div>`).join('');
+        // Severity first, then newest first inside each severity bucket.
+        alerts.sort((a, b) => {
+            const byPriority = priority[a.severity] - priority[b.severity];
+            if (byPriority !== 0) return byPriority;
+            return (b.timeMs || 0) - (a.timeMs || 0);
+        });
+        list.innerHTML = alerts.map(a => `
+            <div class="alert-row ${a.severity}" onclick="app.showHistoryModal('${a.id}')">
+                <div class="alert-title">${this.escapeHtml(a.title)}</div>
+                <div class="alert-meta">${this.escapeHtml(a.meta || '')}</div>
+            </div>
+        `).join('');
     }
 
     async runExtractorLab() {
@@ -2012,6 +2280,7 @@ class App {
         const grid = document.getElementById('productGrid');
         grid.innerHTML = '';
 
+        // Main render pipeline: sort/filter data -> build row markup -> attach row interactions.
         const itemsToRender = this.getSortedItems();
         grid.className = 'list-view';
 
@@ -2722,6 +2991,8 @@ class App {
     closeAllMenus() {
         document.querySelectorAll('.actions-menu').forEach(m => m.classList.remove('active'));
         document.querySelectorAll('.list-item.menu-open').forEach(r => r.classList.remove('menu-open'));
+        this.closeIntervalMenu();
+        this.closeCustomIntervalUnitMenu();
     }
 }
 

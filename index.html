@@ -12,6 +12,7 @@
 
     <div class="container">
         <header id="mainHeader">
+            <!-- Brand + server heartbeat. The dot color reflects backend connectivity/check state. -->
             <div class="header-left">
                 <div class="header-brand" id="menuTrigger" title="Tools & Backups">
                     <div class="menu-icon">
@@ -29,6 +30,7 @@
             </div>
 
             <div class="controls">
+                <!-- Global quick actions for power users and frequent workflows. -->
                 <button id="commandPaletteBtn" title="Open Command Palette (Ctrl/Cmd+K)">
                     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                         viewBox="0 0 24 24">
@@ -43,6 +45,25 @@
                     </svg>
                     Manage Lists
                 </button>
+                <div class="check-interval-control">
+                    <button type="button" id="checkIntervalTrigger" class="custom-select-trigger"
+                        onclick="app.toggleIntervalMenu(event)">
+                        <span id="checkIntervalTriggerLabel">Set Interval</span>
+                        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path d="M6 9l6 6 6-6" />
+                        </svg>
+                    </button>
+                    <div id="checkIntervalMenu" class="custom-select-menu" onclick="event.stopPropagation()">
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('15m')">15 mins</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('30m')">30 mins</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('1h')">1 hour</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('3h')">3 hours</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('6h')">6 hours</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('12h')">12 hours</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('24h')">24 hours</button>
+                        <button type="button" class="custom-select-option" onclick="app.selectIntervalOption('custom')">Custom</button>
+                    </div>
+                </div>
                 <button onclick="app.refreshAll()" id="refreshAllBtn" title="Refresh All">
                     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"
                         viewBox="0 0 24 24">
@@ -138,6 +159,7 @@
         </header>
 
         <div class="dashboard-metrics">
+            <!-- Live summary cards computed from currently visible items (respecting active list/search filters). -->
             <div class="metric-card">
                 <div class="metric-label" title="Number of items currently shown in the selected list filter.">Tracked</div>
                 <div class="metric-value" id="metricTracked">0</div>
@@ -157,6 +179,7 @@
         </div>
 
         <div id="portfolioPanel" class="dashboard-panel active">
+            <!-- Add-item form: URL + optional metadata + optional selector override for hard-to-parse pages. -->
             <div class="input-group">
                 <input type="text" id="urlInput" placeholder="Product URL"
                     title="Enter the direct link to the product page.">
@@ -180,33 +203,35 @@
         </div>
 
         <div id="alertsPanel" class="dashboard-panel">
+            <!-- Rule toggles control which conditions should generate notifications and queue entries. -->
             <div class="panel-card" style="margin-bottom: 0.8rem;">
                 <h2>Alert Rules</h2>
+                <p class="alerts-subtitle">Control which events create notifications. Cooldown applies per item and alert type.</p>
                 <div class="rules-grid">
                     <div class="rule-row">
-                        <label><input type="checkbox" id="ruleTargetHit"> Target hit</label>
+                        <label title="Alert when price crosses to your target or lower."><input type="checkbox" id="ruleTargetHit"> Target hit</label>
                     </div>
                     <div class="rule-row">
-                        <label><input type="checkbox" id="rulePriceDrop"> Any price drop</label>
+                        <label title="Alert when the latest check finds a lower price than the previous check."><input type="checkbox" id="rulePriceDrop"> Any price drop</label>
                     </div>
                     <div class="rule-row">
-                        <label><input type="checkbox" id="ruleDrop24h"> 24h drop %</label>
-                        <input type="number" id="ruleDrop24hPct" min="1" step="0.5" placeholder="Threshold %">
+                        <label title="Alert when price is down by this percentage versus roughly 24 hours ago."><input type="checkbox" id="ruleDrop24h"> 24h drop %</label>
+                        <input type="number" id="ruleDrop24hPct" min="1" step="0.5" placeholder="Threshold %" title="Minimum 24h drop percentage required to trigger this alert.">
                     </div>
                     <div class="rule-row">
-                        <label><input type="checkbox" id="ruleAllTimeLow"> New all-time low</label>
+                        <label title="Alert when current price is the lowest recorded in this item's history."><input type="checkbox" id="ruleAllTimeLow"> New all-time low</label>
                     </div>
                     <div class="rule-row">
-                        <label><input type="checkbox" id="ruleLowConfidence"> Low confidence</label>
-                        <input type="number" id="ruleLowConfidenceThreshold" min="1" max="100" step="1" placeholder="Confidence threshold">
+                        <label title="Alert when extraction confidence falls below your threshold."><input type="checkbox" id="ruleLowConfidence"> Low confidence</label>
+                        <input type="number" id="ruleLowConfidenceThreshold" min="1" max="100" step="1" placeholder="Confidence threshold" title="Confidence percentage below which low-confidence alerts fire.">
                     </div>
                     <div class="rule-row">
-                        <label><input type="checkbox" id="ruleStale"> Stale checks</label>
-                        <input type="number" id="ruleStaleHours" min="1" step="1" placeholder="Stale after hours">
+                        <label title="Alert when an item has not had a successful check within the stale-hours limit."><input type="checkbox" id="ruleStale"> Stale checks</label>
+                        <input type="number" id="ruleStaleHours" min="1" step="1" placeholder="Stale after hours" title="Hours after last successful check before stale alerts trigger.">
                     </div>
                     <div class="rule-row">
-                        <label>Alert cooldown</label>
-                        <input type="number" id="ruleCooldownMinutes" min="1" step="1" placeholder="Cooldown minutes">
+                        <label title="Minimum delay before repeating the same alert type for the same item.">Alert cooldown</label>
+                        <input type="number" id="ruleCooldownMinutes" min="1" step="1" placeholder="Cooldown minutes" title="Minimum minutes before the same item/type alert can fire again.">
                     </div>
                 </div>
                 <div style="margin-top:0.75rem;">
@@ -215,11 +240,13 @@
             </div>
 
             <div class="panel-card" style="margin-bottom: 0.8rem;">
+                <!-- Action Queue is a prioritized, human-readable view of "what needs attention now". -->
                 <h2>Action Queue</h2>
                 <div id="alertsList" class="alerts-list"></div>
             </div>
 
             <div class="panel-card">
+                <!-- Diagnostics log is append-only backend telemetry for extraction/debugging visibility. -->
                 <div class="panel-head">
                     <h2>Diagnostics Log</h2>
                     <button onclick="app.clearDiagnostics()" title="Delete diagnostics history">Clear</button>
@@ -229,6 +256,7 @@
         </div>
 
         <div id="extractorPanel" class="dashboard-panel">
+            <!-- Lab mode: safe sandbox for testing extraction before adding/updating tracked items. -->
             <div class="panel-card">
                 <h2>Extractor Lab</h2>
                 <p class="lab-subtitle">Test a URL and inspect extraction confidence, selected source, and selector suggestions.</p>
@@ -308,6 +336,52 @@
                     <div style="display: flex; gap: 1rem; margin-top: 2rem;">
                         <button class="primary" style="flex: 1;" onclick="app.saveSettings()">Save Settings</button>
                         <button style="flex: 1;" onclick="app.testNotification('target')">Test Notification</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Custom Interval Modal -->
+        <div id="customIntervalModal" class="modal">
+            <div class="modal-overlay" onclick="app.closeCustomIntervalModal()"
+                style="position: absolute; width: 100%; height: 100%;"></div>
+            <div class="modal-content history-modal" style="max-width: 500px;">
+                <div class="modal-header-history">
+                    <h2>Custom Check Interval</h2>
+                    <button class="modal-close-button" onclick="app.closeCustomIntervalModal()">&times;</button>
+                </div>
+                <div class="modal-body-history">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.25rem;">
+                        Set how often background checks run. Use a positive value and choose minutes, hours, or days.
+                    </p>
+                    <div class="settings-group">
+                        <label>Interval</label>
+                        <div class="interval-input-row">
+                            <input type="number" id="customIntervalValue" min="1" step="1"
+                                placeholder="Enter interval value">
+                            <input type="hidden" id="customIntervalUnit" value="minutes">
+                            <div class="custom-select modal-select">
+                                <button type="button" id="customIntervalUnitTrigger" class="custom-select-trigger"
+                                    onclick="app.toggleCustomIntervalUnitMenu(event)">
+                                    <span id="customIntervalUnitTriggerLabel">Minutes</span>
+                                    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                        <path d="M6 9l6 6 6-6" />
+                                    </svg>
+                                </button>
+                                <div id="customIntervalUnitMenu" class="custom-select-menu" onclick="event.stopPropagation()">
+                                    <button type="button" class="custom-select-option"
+                                        onclick="app.selectCustomIntervalUnit('minutes', 'Minutes')">Minutes</button>
+                                    <button type="button" class="custom-select-option"
+                                        onclick="app.selectCustomIntervalUnit('hours', 'Hour(s)')">Hour(s)</button>
+                                    <button type="button" class="custom-select-option"
+                                        onclick="app.selectCustomIntervalUnit('days', 'Day(s)')">Day(s)</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 1rem; margin-top: 1.75rem;">
+                        <button class="primary" style="flex: 1;" onclick="app.saveCustomCheckInterval()">Save Interval</button>
+                        <button style="flex: 1;" onclick="app.closeCustomIntervalModal()">Cancel</button>
                     </div>
                 </div>
             </div>

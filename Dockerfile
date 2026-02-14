@@ -20,6 +20,7 @@ RUN apt-get update && \
 
 # Install server dependencies
 COPY server/package*.json ./server/
+# `npm ci` gives deterministic installs from package-lock.
 RUN cd server && npm ci --omit=dev && npm cache clean --force
 
 # Copy application code
@@ -31,4 +32,5 @@ RUN touch prices.json settings.json && \
     chmod -R 777 prices.json settings.json backups
 
 EXPOSE 3000
+# Start only the backend; static frontend is served by Express.
 CMD ["node", "server/server.js"]

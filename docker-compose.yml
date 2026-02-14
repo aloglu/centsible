@@ -2,8 +2,10 @@ version: '3.8'
 
 services:
   centsible:
+    # Build from local Dockerfile so code/config stay in one project.
     build: .
     container_name: centsible
+    # Expose app UI/API on host port 3000.
     ports:
       - "3000:3000"
     volumes:
@@ -11,6 +13,7 @@ services:
       - ./prices.json:/app/prices.json
       - ./settings.json:/app/settings.json
       - ./backups:/app/backups
+    # Auto-start on daemon restart unless manually stopped.
     restart: unless-stopped
     environment:
       - TZ=Europe/Istanbul # Set your timezone

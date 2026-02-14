@@ -15,15 +15,15 @@ require('dotenv').config({ path: path.join(__dirname, '../.env') });
 
 puppeteer.use(StealthPlugin());
 
-// ... imports ...
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, '../prices.json');
 const SETTINGS_FILE = path.join(__dirname, '../settings.json');
 const DIAGNOSTICS_FILE = path.join(__dirname, '../diagnostics.json');
 const BACKUP_DIR = path.join(__dirname, '../backups');
-const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
+const MAX_CHECK_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const DISCORD_PROXY_BASE = (process.env.DISCORD_PROXY_BASE || '').trim();
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
@@ -45,6 +45,7 @@ function normalizeOrigin(origin) {
 }
 
 function resolveBrowserExecutablePath() {
+    // Prefer explicit env override, then common Linux install paths.
     const candidates = [
         process.env.PUPPETEER_EXECUTABLE_PATH,
         '/usr/bin/google-chrome-stable',
@@ -85,6 +86,7 @@ let lastCheckTime = null;
 let isChecking = false;
 let checkingItemId = null;
 let browserInstance = null; // Single persistent browser
+let checkIntervalHandle = null;
 let diagnostics = [];
 const DEFAULT_LISTS = [{ id: 'default', name: 'Default' }];
 const DEFAULT_ALERT_RULES = {
@@ -105,7 +107,9 @@ let settings = {
     telegramWebhook: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
     lists: [...DEFAULT_LISTS],
-    alertRules: { ...DEFAULT_ALERT_RULES }
+    alertRules: { ...DEFAULT_ALERT_RULES },
+    checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
+    checkIntervalPreset: '1h'
 };
 
 // --- Settings Management ---
@@ -119,7 +123,9 @@ async function loadSettings() {
             settings.lists = [...DEFAULT_LISTS];
         }
         settings.alertRules = { ...DEFAULT_ALERT_RULES, ...(settings.alertRules || {}) };
-        // Environment values have final priority.
+        settings.checkIntervalMs = sanitizeCheckIntervalMs(settings.checkIntervalMs);
+        settings.checkIntervalPreset = String(settings.checkIntervalPreset || 'custom');
+        // Env vars intentionally override file settings for containerized deployments.
         settings.discordWebhook = process.env.DISCORD_WEBHOOK || settings.discordWebhook;
         settings.telegramWebhook = process.env.TELEGRAM_BOT_TOKEN || settings.telegramWebhook;
         settings.telegramChatId = process.env.TELEGRAM_CHAT_ID || settings.telegramChatId;
@@ -138,6 +144,21 @@ async function saveSettings() {
     } catch (e) {
         console.error('[Settings] Save failed:', e.message);
     }
+}
+
+function sanitizeCheckIntervalMs(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return DEFAULT_CHECK_INTERVAL_MS;
+    return Math.max(MIN_CHECK_INTERVAL_MS, Math.min(MAX_CHECK_INTERVAL_MS, Math.round(numeric)));
+}
+
+function scheduleBackgroundChecks() {
+    // Re-arm timer with latest interval (called on startup and interval updates).
+    const intervalMs = sanitizeCheckIntervalMs(settings.checkIntervalMs);
+    settings.checkIntervalMs = intervalMs;
+    if (checkIntervalHandle) clearInterval(checkIntervalHandle);
+    checkIntervalHandle = setInterval(checkPrices, intervalMs);
+    return intervalMs;
 }
 
 async function loadDiagnostics() {
@@ -189,7 +210,7 @@ async function performBackup() {
             console.log(`[Backup] Saved to: ${backupPath}`);
             cleanOldBackups();
         } catch (e) {
-            // Data file might not exist yet
+            // Ignore: first boot can happen before any tracked item exists.
         }
     } catch (e) {
         console.error('[Backup] Failed:', e.message);
@@ -266,6 +287,7 @@ async function readBackupSummary(filename) {
 // Middleware
 app.use(cors({
     origin: (origin, callback) => {
+        // Allow same-origin/non-browser requests; optionally enforce explicit allowlist.
         const normalizedOrigin = normalizeOrigin(origin);
         if (!origin || !hasExplicitCorsAllowlist || allowedOrigins.includes(normalizedOrigin)) {
             callback(null, true);
@@ -292,6 +314,7 @@ const USER_AGENTS = [
 
 // Helper Functions
 function isLegacyDemoItem(item) {
+    // Filters old seeded demo rows so production data stays clean.
     if (!item) return false;
     const id = String(item.id || '').toLowerCase();
     const name = String(item.name || '').toLowerCase();
@@ -324,8 +347,7 @@ async function loadData() {
     } catch (error) {
         if (error.code === 'ENOENT') {
             console.log('No data file found, starting with empty list.');
-            items = []; // Or add demo items here if you want
-            // saveDemoItems();
+            items = [];
         } else {
             console.error('Failed to load data:', error.message);
         }
@@ -1214,6 +1236,7 @@ function extractTitleFromHtml(htmlString) {
 
 async function refreshExchangeRates() {
     try {
+        // External feed is best-effort; failures keep prior cached rates.
         const res = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 15000 });
         const rates = res.data && res.data.rates ? res.data.rates : null;
         if (!rates || typeof rates !== 'object') return;
@@ -1372,6 +1395,7 @@ function getAlertRules() {
 }
 
 function shouldSendAlert(alertKey, cooldownMinutes) {
+    // Cooldown is tracked per alert key (e.g., "drop:itemId") to prevent notification spam.
     const now = Date.now();
     const key = String(alertKey || '');
     const cooldownMs = Math.max(1, Number(cooldownMinutes || DEFAULT_ALERT_RULES.notifyCooldownMinutes)) * 60 * 1000;
@@ -1446,7 +1470,7 @@ async function checkPrices() {
             if (currentPrice !== null || isOutOfStock) {
                 item.currency = currency || 'USD';
                 item.lastCheckAttempt = nowIso;
-                // Update item
+                // Price-based alerts only apply when we have an in-stock numeric value.
                 if (!isOutOfStock && currentPrice !== item.currentPrice) {
                     if (rules.priceDropEnabled && Number.isFinite(oldPrice) && currentPrice < oldPrice) {
                         const dropAmount = (oldPrice - currentPrice).toFixed(2);
@@ -1487,7 +1511,7 @@ async function checkPrices() {
 
                     if (currentPrice !== null) {
                         item.currentPrice = currentPrice;
-                        // Add history entry if distinct from last check
+                        // Keep history concise: append only on meaningful change or long gap.
                         const lastHistory = item.history[item.history.length - 1];
                         if (!lastHistory || lastHistory.price !== currentPrice || (Date.now() - new Date(lastHistory.date).getTime() > 24 * 60 * 60 * 1000)) {
                             item.history.push({ date: new Date().toISOString(), price: currentPrice });
@@ -1495,8 +1519,8 @@ async function checkPrices() {
                     }
                 }
 
-                // Internal USD Conversion
-                item.currency = item.currency || 'USD'; // Default if not found
+                // Normalized USD value is used for fair sorting across mixed currencies.
+                item.currency = item.currency || 'USD';
                 if (Number.isFinite(currentPrice)) {
                     item.lastSeenPrice = Number(currentPrice);
                     item.priceInUSD = convertToUSD(currentPrice, item.currency);
@@ -1585,7 +1609,7 @@ async function checkPrices() {
                 }
             }
         }
-        // Small delay to be polite
+        // Small pacing delay helps avoid bursty scraping patterns.
         await new Promise(r => setTimeout(r, 2000));
     }
     checkingItemId = null;
@@ -1657,12 +1681,19 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', async (req, res) => {
+    const previousInterval = sanitizeCheckIntervalMs(settings.checkIntervalMs);
     settings = { ...settings, ...req.body };
+    settings.checkIntervalMs = sanitizeCheckIntervalMs(settings.checkIntervalMs);
+    settings.checkIntervalPreset = String(settings.checkIntervalPreset || 'custom');
     if (process.env.DISCORD_WEBHOOK) settings.discordWebhook = process.env.DISCORD_WEBHOOK;
     if (process.env.TELEGRAM_BOT_TOKEN) settings.telegramWebhook = process.env.TELEGRAM_BOT_TOKEN;
     if (process.env.TELEGRAM_CHAT_ID) settings.telegramChatId = process.env.TELEGRAM_CHAT_ID;
+    if (settings.checkIntervalMs !== previousInterval) {
+        scheduleBackgroundChecks();
+        console.log(`[Scheduler] Background check interval updated to ${Math.round(settings.checkIntervalMs / 60000)} minutes.`);
+    }
     await saveSettings();
-    res.json({ success: true });
+    res.json({ success: true, checkIntervalMs: settings.checkIntervalMs });
 });
 
 app.get('/api/lists', (req, res) => {
@@ -1931,6 +1962,7 @@ function isPrivateOrSpecialIp(ipAddress) {
 }
 
 async function validateFetchUrl(rawUrl) {
+    // SSRF guardrail: parse URL, validate protocol, resolve DNS, reject local/private targets.
     let parsed;
     try {
         parsed = new URL(rawUrl);
@@ -2001,7 +2033,7 @@ app.get('/api/fetch', async (req, res) => {
     await refreshExchangeRates();
 
     // Start Background Job
-    setInterval(checkPrices, CHECK_INTERVAL_MS);
+    const activeCheckIntervalMs = scheduleBackgroundChecks();
     setInterval(refreshExchangeRates, 60 * 60 * 1000);
 
     // Initial check (optional, but good to have recent data on startup)
@@ -2021,7 +2053,7 @@ app.get('/api/fetch', async (req, res) => {
         console.log(`
 Centsible Server (with Persistence) running on http://localhost:${PORT}
 -------------------------------------------------------
-Background checks running every ${CHECK_INTERVAL_MS / 60000} minutes.
+Background checks running every ${activeCheckIntervalMs / 60000} minutes.
         `);
     });
 

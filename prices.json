@@ -1,1 +1,268 @@
-[]
+[
+  {
+    "id": "1770934139690",
+    "url": "https://www.amazon.com/Mattel-Games-Waterproof-Portable-Camping/dp/B00TXI1NEW/?_encoding=UTF8&pd_rd_w=1L0nz&content-id=amzn1.sym.0ee7ac10-1e05-43b4-8708-e2b0e6430ef1&pf_rd_p=0ee7ac10-1e05-43b4-8708-e2b0e6430ef1&pf_rd_r=QNSZC1Y9D1RC4GNX0ZVD&pd_rd_wg=plHGA&pd_rd_r=4f9e2694-5748-4e52-9857-bf70b4d7c35b",
+    "selector": ".a-price",
+    "name": "Mattel Games UNO Splash Card Game with Waterproof Cards and Portabl...",
+    "currentPrice": 6.89,
+    "currency": "GBP",
+    "originalPrice": 6.89,
+    "targetPrice": null,
+    "history": [
+      {
+        "price": 6.89,
+        "date": "2026-02-12T22:08:59.690Z"
+      }
+    ],
+    "lastChecked": "2026-02-13T02:17:05.484Z",
+    "priceInUSD": 9.387905815732713,
+    "extractionConfidence": 107,
+    "listId": "default",
+    "lastCheckAttempt": "2026-02-14T17:45:16.825Z",
+    "lastCheckStatus": "fail",
+    "lastCheckError": "No price extracted",
+    "stockStatus": "in_stock",
+    "stockReason": "add to cart",
+    "stockConfidence": 78,
+    "stockSource": "purchase-action",
+    "lastSeenPrice": 6.89
+  },
+  {
+    "id": "1770934155555",
+    "url": "https://www.amazon.com.tr/Starbucks-Single-Origin-Colombia-%C3%96%C4%9F%C3%BCt%C3%BClm%C3%BC%C5%9F/dp/B07RFD8YZJ?pd_rd_w=6MJHb&content-id=amzn1.sym.b4e95748-c070-4b92-84f0-20c912fb0260&pf_rd_p=b4e95748-c070-4b92-84f0-20c912fb0260&pf_rd_r=WXR2G2QM8X538BYP8ZN6&pd_rd_wg=aeNUN&pd_rd_r=c94a5811-c5c7-4cd6-b96e-917567b25fa9&pd_rd_i=B07RFD8YZJ",
+    "selector": ".a-price",
+    "name": "Starbucks Single-Origin Colombia Öğütülmüş Kahve 200 g",
+    "currentPrice": 330,
+    "currency": "TRY",
+    "originalPrice": 330,
+    "targetPrice": null,
+    "history": [
+      {
+        "price": 330,
+        "date": "2026-02-12T22:09:15.555Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:25.003Z",
+    "priceInUSD": 7.548124439751899,
+    "extractionConfidence": 100,
+    "listId": "default",
+    "lastCheckAttempt": "2026-02-14T17:45:25.003Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "in_stock",
+    "stockReason": "sepete ekle",
+    "stockConfidence": 78,
+    "stockSource": "purchase-action",
+    "lastSeenPrice": 330
+  },
+  {
+    "id": "1770934173186",
+    "url": "https://www.zuhalmuzik.com/silver-scl-05-pro-serisi-abanoz-sol-klarnet-scl-05",
+    "selector": "script[type=\"application/ld+json\"]",
+    "name": "SILVER SCL-05SL MAHUR / Pro Serisi Abanoz G (Sol) Klarnet (Gümüş Ak...",
+    "currentPrice": 36800,
+    "currency": "TRY",
+    "originalPrice": 36800,
+    "targetPrice": null,
+    "history": [
+      {
+        "price": 36800,
+        "date": "2026-02-12T22:09:33.186Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:31.527Z",
+    "priceInUSD": 841.7302405541512,
+    "extractionConfidence": 95,
+    "listId": "default",
+    "lastCheckAttempt": "2026-02-14T17:45:31.527Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "in_stock",
+    "stockReason": "https://schema.org/instock",
+    "stockConfidence": 90,
+    "stockSource": "jsonld-availability",
+    "lastSeenPrice": 36800
+  },
+  {
+    "id": "1770934212926",
+    "url": "https://www.korayspor.com/adidas-antrenman-urunleri-sort-italya-dna-sort-jz2065/",
+    "selector": "[data-test-id*=\"price\"]",
+    "name": "ADIDAS Erkek",
+    "currentPrice": 2449,
+    "currency": "TRY",
+    "originalPrice": 2449,
+    "targetPrice": null,
+    "history": [
+      {
+        "price": 2449,
+        "date": "2026-02-12T22:10:12.926Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:37.829Z",
+    "extractionConfidence": 100,
+    "priceInUSD": 56.01623258470425,
+    "listId": "default",
+    "lastCheckAttempt": "2026-02-14T17:45:37.829Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "unknown",
+    "stockReason": "",
+    "stockConfidence": 70,
+    "stockSource": null,
+    "lastSeenPrice": 2449
+  },
+  {
+    "id": "1770946406468",
+    "url": "https://www.markakalem.com/pelikan-classic-m200-dolma-kalem-seti-apricot-achat-f-uc",
+    "selector": "script[type=\"application/ld+json\"]",
+    "name": "Pelikan Classic M200 Dolma Kalem Seti Apricot Achat F Uç",
+    "listId": "default",
+    "currentPrice": 11900,
+    "currency": "TRY",
+    "originalPrice": 11900,
+    "targetPrice": null,
+    "extractionConfidence": 95,
+    "history": [
+      {
+        "price": 11900,
+        "date": "2026-02-13T01:33:26.468Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:44.072Z",
+    "lastCheckAttempt": "2026-02-14T17:45:44.072Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "in_stock",
+    "stockConfidence": 90,
+    "stockReason": "instock",
+    "stockSource": "jsonld-availability",
+    "lastSeenPrice": 11900,
+    "priceInUSD": 272.1899419183261
+  },
+  {
+    "id": "1770946466296",
+    "url": "https://sarikalem.com/lamy-al-star-pine-roller-kalem-special-edition-2026",
+    "selector": "script[type=\"application/ld+json\"]",
+    "name": "LAMY AL-star Pine Roller Kalem - Special Edition 2026 | LAMY Roller...",
+    "listId": "default",
+    "currentPrice": 1500,
+    "currency": "TRY",
+    "originalPrice": 1500,
+    "targetPrice": null,
+    "extractionConfidence": 95,
+    "history": [
+      {
+        "price": 1500,
+        "date": "2026-02-13T01:34:26.296Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:49.365Z",
+    "lastCheckAttempt": "2026-02-14T17:45:49.365Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "in_stock",
+    "stockConfidence": 90,
+    "stockReason": "https://schema.org/instock",
+    "stockSource": "jsonld-availability",
+    "lastSeenPrice": 1500,
+    "priceInUSD": 34.30965654432682
+  },
+  {
+    "id": "1770946490829",
+    "url": "https://sarikalem.com/lamy-logo-tukenmez-kalem?Renk=Apricot-Matt",
+    "selector": "script[type=\"application/ld+json\"]",
+    "name": "LAMY Logo Tükenmez Kalemler | LAMY Tükenmez Kalem Modelleri",
+    "listId": "default",
+    "currentPrice": 348.74,
+    "currency": "TRY",
+    "originalPrice": 348.74,
+    "targetPrice": null,
+    "extractionConfidence": 95,
+    "history": [
+      {
+        "price": 348.74,
+        "date": "2026-02-13T01:34:50.829Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:55.242Z",
+    "lastCheckAttempt": "2026-02-14T17:45:55.242Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "out_of_stock",
+    "stockConfidence": 94,
+    "stockReason": "https://schema.org/outofstock",
+    "stockSource": "jsonld-availability",
+    "lastSeenPrice": 348.74,
+    "priceInUSD": 7.9767664155123565
+  },
+  {
+    "id": "1770947056254",
+    "url": "https://www.markakalem.com/pelikan-souveran-m815-metal-striped-blue-special-edition-dolma-kalem-m-uc",
+    "selector": "script[type=\"application/ld+json\"]",
+    "name": "Pelikan Souverän M815 Metal Striped Blue Special Edition Dolma Kale...",
+    "listId": "default",
+    "currentPrice": 48450,
+    "currency": "TRY",
+    "originalPrice": 48450,
+    "targetPrice": null,
+    "extractionConfidence": 95,
+    "history": [
+      {
+        "price": 48450,
+        "date": "2026-02-13T01:44:16.254Z"
+      }
+    ],
+    "lastChecked": "2026-02-14T17:45:59.835Z",
+    "lastCheckAttempt": "2026-02-14T17:45:59.835Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "out_of_stock",
+    "stockConfidence": 94,
+    "stockReason": "outofstock",
+    "stockSource": "jsonld-availability",
+    "lastSeenPrice": 48450,
+    "priceInUSD": 1108.201906381756
+  },
+  {
+    "id": "1771012256570",
+    "url": "https://www.amazon.com/Fender-Mini-Twin-Amp-Miniature/dp/B076X28H9S?crid=CNF2X29Z1V35&dib=eyJ2IjoiMSJ9.9rWz2u6aGrJ0OngvdDR8i04rlU2t9mfUdVzH758w0W7NlyjbNsq4xZLOcc7DIjQEGNSMEnMeQeGq8_mC-a4mVGucPolURovR-kQpDd6MYydryBfIRRQVYiJI11CgtdORFg960DrmkBCw3Vr7364M52pM7Dhp3l5NBUqpEbcxOnfrgfNUMb-yciYb_LXXH2JgFWCJxr983-5bTWYFbdmpAi-QJvjpj34ode7SSc2l980LlOhfdrlwZrCn03eiJBSV4lFIRG8oc6h6IU1foQ9gadp_n8TnTnch_xKkghBuj3k.b8MrxlL6UfhCyJMoScMlrOhFT7vPQcPCFPqpDChScXc&dib_tag=se&keywords=fender%2Bamp&qid=1771009193&sprefix=%2Caps%2C286&sr=8-13&th=1",
+    "selector": null,
+    "name": "Fender",
+    "listId": "default",
+    "currentPrice": null,
+    "currency": "USD",
+    "originalPrice": null,
+    "targetPrice": null,
+    "extractionConfidence": 88,
+    "history": [],
+    "lastChecked": "2026-02-14T17:46:04.422Z",
+    "lastCheckAttempt": "2026-02-14T17:46:04.422Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "out_of_stock",
+    "stockConfidence": 88,
+    "stockReason": "unqualified buy box",
+    "stockSource": "amazon-unqualified-buybox"
+  },
+  {
+    "id": "1771012271493",
+    "url": "https://www.amazon.com.tr/dp/B00G6CZGSC/?coliid=I1343OXNBFM2LT&colid=2FHVWEIANV8CS&psc=0&ref_=list_c_wl_lv_ov_lig_dp_it_im",
+    "selector": null,
+    "name": "Pilot",
+    "listId": "default",
+    "currentPrice": null,
+    "currency": "TRY",
+    "originalPrice": null,
+    "targetPrice": null,
+    "extractionConfidence": 88,
+    "history": [],
+    "lastChecked": "2026-02-14T17:46:10.537Z",
+    "lastCheckAttempt": "2026-02-14T17:46:10.537Z",
+    "lastCheckStatus": "ok",
+    "lastCheckError": "",
+    "stockStatus": "out_of_stock",
+    "stockConfidence": 88,
+    "stockReason": "unqualified buy box",
+    "stockSource": "amazon-unqualified-buybox"
+  }
+]
