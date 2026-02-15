@@ -104,4 +104,4 @@ Database state is stored in `prices.json`. Scheduled backups are saved to the `b
 
 ## License
 
-[MIT](https://github.com/aloglu/centsible/blob/main/LICENSE)
+Released under the [MIT License](https://github.com/aloglu/centsible/blob/main/LICENSE).
