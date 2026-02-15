@@ -2,6 +2,35 @@
 
 Centsible is a self-hosted price tracking application that monitors product prices across multiple websites. It provides data visualization, historical tracking, and automated alerts via Discord or Telegram.
 
+<div align="center">
+<table border="0">
+  <tr>
+    <td><a href="screenshots/main-page.png"><img src="screenshots/main-page.png" alt="Main Page" width="180"/></a></td>
+    <td><a href="screenshots/command-palette.png"><img src="screenshots/command-palette.png" alt="Command Palette" width="180"/></a></td>
+    <td><a href="screenshots/lists-manager.png"><img src="screenshots/lists-manager.png" alt="Lists Manager" width="180"/></a></td>
+    <td><a href="screenshots/notification-settings.png"><img src="screenshots/notification-settings.png" alt="Notification Settings" width="180"/></a></td>
+  </tr>
+  <tr>
+    <td align="center">Main Page</td>
+    <td align="center">Command Palette</td>
+    <td align="center">Lists Manager</td>
+    <td align="center">Notification Settings</td>
+  </tr>
+  <tr>
+    <td><a href="screenshots/alerts-and-diagnostics.png"><img src="screenshots/alerts-and-diagnostics.png" alt="Alerts & Diagnostics" width="180"/></a></td>
+    <td><a href="screenshots/extractor-lab.png"><img src="screenshots/extractor-lab.png" alt="Extractor Lab" width="180"/></a></td>
+    <td><a href="screenshots/custom-intervals.png"><img src="screenshots/custom-intervals.png" alt="Custom Intervals" width="180"/></a></td>
+    <td><a href="screenshots/automated-backups.png"><img src="screenshots/automated-backups.png" alt="Automated Backups" width="180"/></a></td>
+  </tr>
+  <tr>
+    <td align="center">Alerts & Diagnostics</td>
+    <td align="center">Extractor Lab</td>
+    <td align="center">Custom Intervals</td>
+    <td align="center">Automated Backups</td>
+  </tr>
+</table>
+</div>
+
 ## Features
 
 - **Price Extraction**: Automated price retrieval using Cheerio for static pages and Puppeteer Stealth for dynamic content.
