@@ -1,4 +1,4 @@
-{
+﻿{
   "discordWebhook": "",
   "telegramWebhook": "",
   "telegramChatId": "",
@@ -12,14 +12,14 @@
     "targetHitEnabled": true,
     "priceDropEnabled": true,
     "priceDrop24hEnabled": true,
-    "priceDrop24hPercent": 3,
+    "priceDrop24hPercent": 5,
     "allTimeLowEnabled": true,
     "lowConfidenceEnabled": true,
-    "lowConfidenceThreshold": 60,
+    "lowConfidenceThreshold": 55,
     "staleEnabled": true,
-    "staleHours": 10,
-    "notifyCooldownMinutes": 120
+    "staleHours": 12,
+    "notifyCooldownMinutes": 240
   },
-  "checkIntervalMs": 1800000,
-  "checkIntervalPreset": "30m"
+  "checkIntervalMs": 3600000,
+  "checkIntervalPreset": "1h"
 }

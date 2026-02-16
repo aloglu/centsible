@@ -1,4 +1,7 @@
 @echo off
+REM This script starts Centsible in Windows background mode using PM2.
+REM Use it when you want the tracker to keep running after closing this terminal window.
+REM Intended for running Centsible on a Windows machine (not a dedicated server).
 REM Use PM2 so the tracker keeps running after this terminal closes.
 echo Checking for PM2...
 where pm2 >nul 2>nul
