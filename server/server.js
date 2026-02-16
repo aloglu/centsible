@@ -20,6 +20,7 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, '../prices.json');
 const SETTINGS_FILE = path.join(__dirname, '../settings.json');
 const DIAGNOSTICS_FILE = path.join(__dirname, '../diagnostics.json');
+const AUDIT_FILE = path.join(__dirname, '../audit.json');
 const BACKUP_DIR = path.join(__dirname, '../backups');
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
@@ -88,6 +89,7 @@ let checkingItemId = null;
 let browserInstance = null; // Single persistent browser
 let checkIntervalHandle = null;
 let diagnostics = [];
+let auditLog = [];
 const DEFAULT_LISTS = [{ id: 'default', name: 'Default' }];
 const DEFAULT_ALERT_RULES = {
     targetHitEnabled: true,
@@ -136,14 +138,23 @@ async function loadSettings() {
 
 async function saveSettings() {
     try {
-        const persistentSettings = { ...settings };
-        if (process.env.DISCORD_WEBHOOK) persistentSettings.discordWebhook = '';
-        if (process.env.TELEGRAM_BOT_TOKEN) persistentSettings.telegramWebhook = '';
-        if (process.env.TELEGRAM_CHAT_ID) persistentSettings.telegramChatId = '';
-        await fsPromises.writeFile(SETTINGS_FILE, JSON.stringify(persistentSettings, null, 2));
+        await fsPromises.writeFile(SETTINGS_FILE, JSON.stringify(getPersistentSettingsSnapshot(settings), null, 2));
     } catch (e) {
         console.error('[Settings] Save failed:', e.message);
     }
+}
+
+function getPersistentSettingsSnapshot(sourceSettings = settings) {
+    const persistentSettings = { ...(sourceSettings || {}) };
+    if (process.env.DISCORD_WEBHOOK) persistentSettings.discordWebhook = '';
+    if (process.env.TELEGRAM_BOT_TOKEN) persistentSettings.telegramWebhook = '';
+    if (process.env.TELEGRAM_CHAT_ID) persistentSettings.telegramChatId = '';
+    return persistentSettings;
+}
+
+function getBackupSettingsSnapshot(sourceSettings = settings) {
+    // Backups should be fully restorable, including currently effective webhook settings.
+    return { ...(sourceSettings || {}) };
 }
 
 function sanitizeCheckIntervalMs(value) {
@@ -193,6 +204,40 @@ function addDiagnostic(entry) {
     saveDiagnostics().catch(() => { });
 }
 
+async function loadAuditLog() {
+    try {
+        if (!fs.existsSync(AUDIT_FILE)) {
+            auditLog = [];
+            return;
+        }
+        const data = await fsPromises.readFile(AUDIT_FILE, 'utf8');
+        const parsed = JSON.parse(data);
+        auditLog = Array.isArray(parsed) ? parsed.slice(0, 5000) : [];
+    } catch (e) {
+        console.error('[Audit] Load failed:', e.message);
+        auditLog = [];
+    }
+}
+
+async function saveAuditLog() {
+    try {
+        await fsPromises.writeFile(AUDIT_FILE, JSON.stringify(auditLog.slice(0, 5000), null, 2));
+    } catch (e) {
+        console.error('[Audit] Save failed:', e.message);
+    }
+}
+
+function addAuditEntry(action, details = {}, source = 'system') {
+    auditLog.unshift({
+        time: new Date().toISOString(),
+        action: String(action || 'unknown'),
+        source: String(source || 'system'),
+        details: details && typeof details === 'object' ? details : {}
+    });
+    if (auditLog.length > 5000) auditLog = auditLog.slice(0, 5000);
+    saveAuditLog().catch(() => { });
+}
+
 // --- Backup Logic ---
 async function performBackup() {
     try {
@@ -202,16 +247,19 @@ async function performBackup() {
             await fsPromises.mkdir(BACKUP_DIR, { recursive: true });
         }
 
-        try {
-            await fsPromises.access(DATA_FILE);
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const backupPath = path.join(BACKUP_DIR, `prices-${timestamp}.json`);
-            await fsPromises.copyFile(DATA_FILE, backupPath);
-            console.log(`[Backup] Saved to: ${backupPath}`);
-            cleanOldBackups();
-        } catch (e) {
-            // Ignore: first boot can happen before any tracked item exists.
-        }
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupPath = path.join(BACKUP_DIR, `prices-${timestamp}.json`);
+        const snapshot = {
+            schema: 'centsible-backup-v2',
+            createdAt: new Date().toISOString(),
+            items: Array.isArray(items) ? items : [],
+            settings: getBackupSettingsSnapshot(settings),
+            diagnostics: Array.isArray(diagnostics) ? diagnostics : [],
+            audit: Array.isArray(auditLog) ? auditLog : []
+        };
+        await fsPromises.writeFile(backupPath, JSON.stringify(snapshot, null, 2));
+        console.log(`[Backup] Saved to: ${backupPath}`);
+        cleanOldBackups();
     } catch (e) {
         console.error('[Backup] Failed:', e.message);
     }
@@ -253,6 +301,7 @@ async function cleanOldBackups() {
 function summarizeItemsSnapshot(rawItems) {
     const arr = Array.isArray(rawItems) ? rawItems : [];
     const itemCount = arr.length;
+    const purchasedCount = arr.filter(item => Boolean(item && item.purchased)).length;
     let minDate = null;
     let maxDate = null;
     const listSet = new Set();
@@ -270,6 +319,7 @@ function summarizeItemsSnapshot(rawItems) {
 
     return {
         itemCount,
+        purchasedCount,
         listCount: listSet.size || 1,
         rangeStart: minDate ? minDate.toISOString() : null,
         rangeEnd: maxDate ? maxDate.toISOString() : null
@@ -280,7 +330,21 @@ async function readBackupSummary(filename) {
     const backupPath = path.join(BACKUP_DIR, filename);
     const raw = await fsPromises.readFile(backupPath, 'utf8');
     const parsed = JSON.parse(raw);
-    return summarizeItemsSnapshot(parsed);
+    if (Array.isArray(parsed)) {
+        return {
+            ...summarizeItemsSnapshot(parsed),
+            auditCount: 0,
+            diagnosticsCount: 0
+        };
+    }
+    const summary = summarizeItemsSnapshot(parsed && parsed.items);
+    const settingsLists = parsed && parsed.settings && Array.isArray(parsed.settings.lists) ? parsed.settings.lists : null;
+    if (settingsLists && settingsLists.length) {
+        summary.listCount = settingsLists.length;
+    }
+    summary.auditCount = Array.isArray(parsed && parsed.audit) ? parsed.audit.length : 0;
+    summary.diagnosticsCount = Array.isArray(parsed && parsed.diagnostics) ? parsed.diagnostics.length : 0;
+    return summary;
 }
 // --------------------
 
@@ -539,6 +603,39 @@ function scoreAvailabilityText(rawText) {
     return { outScore, inScore, outReason, inReason };
 }
 
+function detectShopifyAvailabilityFromRawHtml(htmlString) {
+    const raw = String(htmlString || '');
+    if (!raw) return null;
+
+    const isShopifyLike = /(myshopify\.com|Shopify\.shop|\/cdn\/shop\/|shopify-digital-wallet)/i.test(raw);
+    if (!isShopifyLike) return null;
+
+    // Common Shopify product data surfaces used by many themes/apps.
+    const hasBisOutOfStock = /_BISConfig\.product\s*=\s*\{[\s\S]{0,120000}?"available"\s*:\s*false/i.test(raw)
+        || /_BISConfig\.product\.variants\[[0-9]+\]\['oos'\]\s*=\s*true/i.test(raw);
+    const hasSchemaOutOfStock = /"availability"\s*:\s*"https?:\/\/schema\.org\/OutOfStock"/i.test(raw);
+    const hasBisInStock = /_BISConfig\.product\s*=\s*\{[\s\S]{0,120000}?"available"\s*:\s*true/i.test(raw);
+    const hasSchemaInStock = /"availability"\s*:\s*"https?:\/\/schema\.org\/InStock"/i.test(raw);
+
+    if (hasBisOutOfStock || hasSchemaOutOfStock) {
+        return {
+            status: 'out_of_stock',
+            confidence: 96,
+            reason: hasBisOutOfStock ? 'shopify product json available=false' : 'shopify schema outofstock',
+            source: hasBisOutOfStock ? 'shopify-product-json' : 'shopify-schema'
+        };
+    }
+    if (hasBisInStock || hasSchemaInStock) {
+        return {
+            status: 'in_stock',
+            confidence: 91,
+            reason: hasBisInStock ? 'shopify product json available=true' : 'shopify schema instock',
+            source: hasBisInStock ? 'shopify-product-json' : 'shopify-schema'
+        };
+    }
+    return null;
+}
+
 function detectAvailability($, htmlString, targetUrl = '') {
     let bestOut = { score: 0, reason: '', source: '' };
     let bestIn = { score: 0, reason: '', source: '' };
@@ -656,6 +753,16 @@ function detectAvailability($, htmlString, targetUrl = '') {
             }
         }
     });
+
+    const shopifyRawAvailability = detectShopifyAvailabilityFromRawHtml(htmlString);
+    if (shopifyRawAvailability) {
+        setStructured(
+            shopifyRawAvailability.status,
+            Number(shopifyRawAvailability.confidence || 0),
+            shopifyRawAvailability.reason,
+            shopifyRawAvailability.source
+        );
+    }
 
     const stockSelectors = [
         '#availability',
@@ -1350,7 +1457,11 @@ async function fetchWithPuppeteer(url) {
 }
 
 // --- Notifications & Webhooks ---
-async function notifyAll(title, message) {
+async function notifyAll(title, message, overrideSettings = null) {
+    const effective = overrideSettings && typeof overrideSettings === 'object'
+        ? { ...settings, ...overrideSettings }
+        : settings;
+
     // 1. Local Notification
     notifier.notify({
         title: title,
@@ -1360,9 +1471,9 @@ async function notifyAll(title, message) {
     });
 
     // 2. Discord Webhook
-    if (settings.discordWebhook) {
+    if (effective.discordWebhook) {
         try {
-            const discordUrl = buildDiscordWebhookUrl(settings.discordWebhook);
+            const discordUrl = buildDiscordWebhookUrl(effective.discordWebhook);
             await axios.post(discordUrl, {
                 content: `**${title}**\n${message}`
             });
@@ -1376,11 +1487,11 @@ async function notifyAll(title, message) {
     }
 
     // 3. Telegram Webhook (Simple bot implementation)
-    if (settings.telegramWebhook && settings.telegramChatId) {
+    if (effective.telegramWebhook && effective.telegramChatId) {
         try {
-            const url = `https://api.telegram.org/bot${settings.telegramWebhook}/sendMessage`;
+            const url = `https://api.telegram.org/bot${effective.telegramWebhook}/sendMessage`;
             await axios.post(url, {
-                chat_id: settings.telegramChatId,
+                chat_id: effective.telegramChatId,
                 text: `*${title}*\n${message}`,
                 parse_mode: 'Markdown'
             });
@@ -1461,6 +1572,7 @@ async function checkPrices() {
             const currentPrice = extraction.price;
             const currency = extraction.currency;
             const availability = extraction.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
+            const previousStockStatus = String(item.stockStatus || 'unknown');
             const isOutOfStock = availability.status === 'out_of_stock';
             item.stockStatus = availability.status || 'unknown';
             item.stockConfidence = Number(availability.confidence || 0);
@@ -1531,8 +1643,20 @@ async function checkPrices() {
                 item.lastCheckError = '';
                 updatedCount++;
 
-                if (isOutOfStock && shouldSendAlert(`oos:${item.id}`, rules.notifyCooldownMinutes)) {
-                    notifyAll('Out of Stock', `${item.name} appears to be out of stock.`);
+                if (previousStockStatus !== 'out_of_stock' && isOutOfStock) {
+                    item.stockChangedAt = nowIso;
+                    item.stockTransition = 'out_of_stock';
+                    if (shouldSendAlert(`oos-transition:${item.id}`, rules.notifyCooldownMinutes)) {
+                        notifyAll('Out of Stock', `${item.name} appears to be out of stock.`);
+                    }
+                } else if (previousStockStatus === 'out_of_stock' && item.stockStatus === 'in_stock') {
+                    item.stockChangedAt = nowIso;
+                    item.stockTransition = 'back_in_stock';
+                    if (shouldSendAlert(`back-in-stock:${item.id}`, rules.notifyCooldownMinutes)) {
+                        notifyAll('Back in Stock', `${item.name} appears to be back in stock.`);
+                    }
+                } else {
+                    item.stockTransition = null;
                 }
 
                 if (rules.lowConfidenceEnabled && Number(item.extractionConfidence || 0) > 0 && Number(item.extractionConfidence) < Number(rules.lowConfidenceThreshold || 0)) {
@@ -1666,11 +1790,19 @@ app.post('/api/check-now', (req, res) => {
 
 // Test Notification
 app.post('/api/test-notification', async (req, res) => {
-    const { type } = req.body;
+    const body = req.body || {};
+    const type = body.type;
+    const testSettings = body.settings && typeof body.settings === 'object'
+        ? {
+            discordWebhook: String(body.settings.discordWebhook || '').trim(),
+            telegramWebhook: String(body.settings.telegramWebhook || '').trim(),
+            telegramChatId: String(body.settings.telegramChatId || '').trim()
+        }
+        : null;
     if (type === 'target') {
-        await notifyAll('Test: Target Hit', 'This is a test notification for a target price hit.');
+        await notifyAll('Test: Target Hit', 'This is a test notification for a target price hit.', testSettings);
     } else {
-        await notifyAll('Test: Price Drop', 'This is a test notification for a generic price drop.');
+        await notifyAll('Test: Price Drop', 'This is a test notification for a generic price drop.', testSettings);
     }
     res.json({ success: true });
 });
@@ -1792,6 +1924,27 @@ app.get('/api/diagnostics', (req, res) => {
 app.delete('/api/diagnostics', async (req, res) => {
     diagnostics = [];
     await saveDiagnostics();
+    res.json({ success: true });
+});
+
+app.get('/api/audit', (req, res) => {
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 300)));
+    res.json({ entries: auditLog.slice(0, limit), total: auditLog.length });
+});
+
+app.post('/api/audit', async (req, res) => {
+    const body = req.body || {};
+    const action = String(body.action || '').trim();
+    if (!action) return res.status(400).json({ error: 'action is required' });
+    const details = body.details && typeof body.details === 'object' ? body.details : {};
+    const source = String(body.source || 'ui').trim() || 'ui';
+    addAuditEntry(action, details, source);
+    res.json({ success: true });
+});
+
+app.delete('/api/audit', async (req, res) => {
+    auditLog = [];
+    await saveAuditLog();
     res.json({ success: true });
 });
 
@@ -1922,16 +2075,71 @@ app.post('/api/backups/restore', async (req, res) => {
     const backupPath = path.join(BACKUP_DIR, filename);
     try {
         await fsPromises.access(backupPath);
-        // Safety backup of current state
+        // Safety backup of current state (full snapshot).
         try {
-            if (fs.existsSync(DATA_FILE)) {
-                const safetyPath = path.join(BACKUP_DIR, `manual-pre-restore-${Date.now()}.json`);
-                await fsPromises.copyFile(DATA_FILE, safetyPath);
-            }
+            const safetyPath = path.join(BACKUP_DIR, `manual-pre-restore-${Date.now()}.json`);
+            const safetySnapshot = {
+                schema: 'centsible-backup-v2',
+                createdAt: new Date().toISOString(),
+                items: Array.isArray(items) ? items : [],
+                settings: getBackupSettingsSnapshot(settings),
+                diagnostics: Array.isArray(diagnostics) ? diagnostics : [],
+                audit: Array.isArray(auditLog) ? auditLog : []
+            };
+            await fsPromises.writeFile(safetyPath, JSON.stringify(safetySnapshot, null, 2));
         } catch (e) { }
 
-        await fsPromises.copyFile(backupPath, DATA_FILE);
-        await loadData(); // Reload memory state
+        const raw = await fsPromises.readFile(backupPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        const fallbackListId = (settings.lists && settings.lists[0] && settings.lists[0].id) || 'default';
+
+        if (Array.isArray(parsed)) {
+            // Legacy backup format (items only).
+            items = parsed.map(item => ({
+                ...item,
+                listId: item.listId || fallbackListId
+            }));
+            await saveData();
+        } else {
+            // Full-state backup format.
+            const restoredItems = Array.isArray(parsed.items) ? parsed.items : [];
+            const restoredSettings = parsed.settings && typeof parsed.settings === 'object' ? parsed.settings : null;
+            const restoredDiagnostics = Array.isArray(parsed.diagnostics) ? parsed.diagnostics : null;
+            const restoredAudit = Array.isArray(parsed.audit) ? parsed.audit : null;
+
+            items = restoredItems.map(item => ({
+                ...item,
+                listId: item.listId || fallbackListId
+            }));
+            await saveData();
+
+            if (restoredSettings) {
+                settings = { ...settings, ...restoredSettings };
+                settings.alertRules = { ...DEFAULT_ALERT_RULES, ...(settings.alertRules || {}) };
+                settings.checkIntervalMs = sanitizeCheckIntervalMs(settings.checkIntervalMs);
+                settings.checkIntervalPreset = String(settings.checkIntervalPreset || 'custom');
+                if (!Array.isArray(settings.lists) || !settings.lists.length) settings.lists = [...DEFAULT_LISTS];
+                await saveSettings();
+            }
+
+            if (restoredDiagnostics) {
+                diagnostics = restoredDiagnostics.slice(0, 2000);
+                await saveDiagnostics();
+            }
+
+            if (restoredAudit) {
+                auditLog = restoredAudit.slice(0, 5000);
+                await saveAuditLog();
+            }
+        }
+
+        // Reload all runtime state and re-arm scheduler with restored interval.
+        await loadSettings();
+        await loadData();
+        await loadDiagnostics();
+        await loadAuditLog();
+        scheduleBackgroundChecks();
+
         res.json({ success: true, message: `Restored from ${filename}` });
     } catch (e) {
         res.status(500).json({ error: `Failed to restore: ${e.message}` });
@@ -2030,6 +2238,7 @@ app.get('/api/fetch', async (req, res) => {
     await loadSettings();
     await loadData();
     await loadDiagnostics();
+    await loadAuditLog();
     await refreshExchangeRates();
 
     // Start Background Job

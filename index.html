@@ -93,6 +93,13 @@
                             </svg>
                             Alerts
                         </button>
+                        <button class="menu-item" onclick="app.switchViewFromMenu('purchased')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M5 13l4 4L19 7" />
+                            </svg>
+                            Purchased
+                        </button>
                         <button class="menu-item" onclick="app.switchViewFromMenu('extractor')">
                             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                                 viewBox="0 0 24 24">
@@ -130,6 +137,13 @@
                     </div>
                     <div class="menu-section">
                         <div class="menu-label">System</div>
+                        <button class="menu-item" onclick="app.switchViewFromMenu('audit')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M9 12l2 2 4-4M4 6h16M4 18h16M6 6v12" />
+                            </svg>
+                            System Activity
+                        </button>
                         <button class="menu-item" onclick="app.showListsModal()">
                             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                                 viewBox="0 0 24 24">
@@ -179,7 +193,7 @@
         </div>
 
         <div id="portfolioPanel" class="dashboard-panel active">
-            <!-- Add-item form: URL + optional metadata + optional selector override for hard-to-parse pages. -->
+            <!-- Add-item form: URL + optional metadata + target + list assignment. -->
             <div class="input-group">
                 <input type="text" id="urlInput" placeholder="Product URL"
                     title="Enter the direct link to the product page.">
@@ -187,9 +201,17 @@
                     title="Give this item a custom name for your list.">
                 <input type="number" id="targetPriceInput" placeholder="Target Price (Optional)" style="flex-grow: 0.15;"
                     title="Set a goal price. You'll get a highlighted alert when the price hits this target.">
-                <input type="text" id="selectorInput" list="selector-history" placeholder="Selector / ID (Optional)"
-                    style="flex-grow: 0.15;" title="Specific CSS Selector or ID to find the price element.">
-                <datalist id="selector-history"></datalist>
+                <div class="custom-select add-item-list-select">
+                    <button type="button" id="addItemListTrigger" class="custom-select-trigger"
+                        onclick="app.toggleAddItemListMenu(event)"
+                        title="Choose which list this item should be saved to.">
+                        <span id="addItemListTriggerLabel">Add to</span>
+                        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path d="M6 9l6 6 6-6" />
+                        </svg>
+                    </button>
+                    <div id="addItemListMenu" class="custom-select-menu" onclick="event.stopPropagation()"></div>
+                </div>
                 <button class="primary" onclick="app.addItem()" id="addBtn" title="Add to tracking list">
                     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                         <path d="M12 4v16m8-8H4" />
@@ -238,21 +260,6 @@
                     <button class="primary" onclick="app.saveAlertRules()">Save Alert Rules</button>
                 </div>
             </div>
-
-            <div class="panel-card" style="margin-bottom: 0.8rem;">
-                <!-- Action Queue is a prioritized, human-readable view of "what needs attention now". -->
-                <h2>Action Queue</h2>
-                <div id="alertsList" class="alerts-list"></div>
-            </div>
-
-            <div class="panel-card">
-                <!-- Diagnostics log is append-only backend telemetry for extraction/debugging visibility. -->
-                <div class="panel-head">
-                    <h2>Diagnostics Log</h2>
-                    <button onclick="app.clearDiagnostics()" title="Delete diagnostics history">Clear</button>
-                </div>
-                <div id="diagnosticsList" class="diagnostics-list"></div>
-            </div>
         </div>
 
         <div id="extractorPanel" class="dashboard-panel">
@@ -266,6 +273,75 @@
                     <button class="primary" id="labRunBtn" onclick="app.runExtractorLab()" title="Run extraction diagnostics for this URL.">Run Extraction</button>
                 </div>
                 <div id="labResult" class="lab-result"></div>
+            </div>
+        </div>
+
+        <div id="auditPanel" class="dashboard-panel">
+            <div class="panel-card system-activity-section" id="systemSectionQueue" style="margin-bottom: 0.8rem;">
+                <div class="panel-head">
+                    <h2 title="Prioritized items that need attention now, based on your active alert rules and latest checks.">Action Queue</h2>
+                    <div class="panel-head-actions">
+                        <button type="button" class="collapse-toggle-btn"
+                            onclick="app.toggleSystemActivitySection(event, 'queue')" aria-expanded="true"
+                            title="Collapse section">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M6 9l6 6 6-6" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="system-activity-body">
+                    <div id="alertsList" class="alerts-list"></div>
+                </div>
+            </div>
+            <div class="panel-card system-activity-section" id="systemSectionDiagnostics" style="margin-bottom: 0.8rem;">
+                <div class="panel-head">
+                    <h2 title="Technical extraction and check logs from the backend, useful for troubleshooting selector or scraping issues.">Diagnostics Log</h2>
+                    <div class="panel-head-actions">
+                        <button onclick="event.stopPropagation(); app.clearDiagnostics()"
+                            title="Delete diagnostics history">Clear</button>
+                        <button type="button" class="collapse-toggle-btn"
+                            onclick="app.toggleSystemActivitySection(event, 'diagnostics')" aria-expanded="true"
+                            title="Collapse section">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M6 9l6 6 6-6" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="system-activity-body">
+                    <div id="diagnosticsList" class="diagnostics-list"></div>
+                </div>
+            </div>
+            <div class="panel-card system-activity-section" id="systemSectionAudit">
+                <div class="panel-head">
+                    <h2 title="Chronological record of user-triggered actions such as adds, edits, restores, and archival events.">User Activity Log</h2>
+                    <div class="panel-head-actions">
+                        <button onclick="event.stopPropagation(); app.clearAuditLog()" title="Clear audit history">Clear</button>
+                        <button type="button" class="collapse-toggle-btn"
+                            onclick="app.toggleSystemActivitySection(event, 'audit')" aria-expanded="true"
+                            title="Collapse section">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                                viewBox="0 0 24 24">
+                                <path d="M6 9l6 6 6-6" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="system-activity-body">
+                    <div id="auditList" class="audit-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="purchasedPanel" class="dashboard-panel">
+            <div class="panel-card">
+                <div class="panel-head">
+                    <h2>Purchased</h2>
+                </div>
+                <div id="purchasedList" class="purchased-list"></div>
             </div>
         </div>
 

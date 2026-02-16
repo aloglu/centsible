@@ -2,35 +2,6 @@
 
 Centsible is a self-hosted price tracking application that monitors product prices across multiple websites. It provides data visualization, historical tracking, and automated alerts via Discord or Telegram.
 
-<div align="center">
-<table border="0">
-  <tr>
-    <td><a href="screenshots/main-page.png"><img src="screenshots/main-page.png" alt="Main Page" width="180"/></a></td>
-    <td><a href="screenshots/command-palette.png"><img src="screenshots/command-palette.png" alt="Command Palette" width="180"/></a></td>
-    <td><a href="screenshots/lists-manager.png"><img src="screenshots/lists-manager.png" alt="Lists Manager" width="180"/></a></td>
-    <td><a href="screenshots/notification-settings.png"><img src="screenshots/notification-settings.png" alt="Notification Settings" width="180"/></a></td>
-  </tr>
-  <tr>
-    <td align="center">Main Page</td>
-    <td align="center">Command Palette</td>
-    <td align="center">Lists Manager</td>
-    <td align="center">Notification Settings</td>
-  </tr>
-  <tr>
-    <td><a href="screenshots/alerts-and-diagnostics.png"><img src="screenshots/alerts-and-diagnostics.png" alt="Alerts & Diagnostics" width="180"/></a></td>
-    <td><a href="screenshots/extractor-lab.png"><img src="screenshots/extractor-lab.png" alt="Extractor Lab" width="180"/></a></td>
-    <td><a href="screenshots/custom-intervals.png"><img src="screenshots/custom-intervals.png" alt="Custom Intervals" width="180"/></a></td>
-    <td><a href="screenshots/automated-backups.png"><img src="screenshots/automated-backups.png" alt="Automated Backups" width="180"/></a></td>
-  </tr>
-  <tr>
-    <td align="center">Alerts & Diagnostics</td>
-    <td align="center">Extractor Lab</td>
-    <td align="center">Custom Intervals</td>
-    <td align="center">Automated Backups</td>
-  </tr>
-</table>
-</div>
-
 ## Features
 
 - **Price Extraction**: Automated price retrieval using Cheerio for static pages and Puppeteer Stealth for dynamic content.
@@ -42,6 +13,8 @@ Centsible is a self-hosted price tracking application that monitors product pric
     - 24-hour percentage drop tracking.
     - All-time low detection.
 - **Notifications**: Support for Discord Webhooks and Telegram Bot API.
+- **System Activity**: Unified operational view with Action Queue, Diagnostics Log, and User Activity Log.
+- **Purchased Archive**: Mark items as purchased, remove them from active tracking, and restore later if needed.
 - **Extractor Lab**: Tool for testing and configuring custom CSS selectors for specific sites.
 - **Currency Support**: Automatic detection and conversion between major currencies (USD, EUR, GBP, TRY, JPY, etc.) using live rates.
 - **Data Management**: JSON and CSV export/import, plus automated local backups.
@@ -100,8 +73,24 @@ If the automated extractor fails on a specific site, use the **Extractor Lab** t
 
 ## Backup and Portability
 
-Database state is stored in `prices.json`. Scheduled backups are saved to the `backups/` directory. Portfolios can be moved by transferring the `prices.json` and `settings.json` files.
+Runtime state is stored in local JSON files:
+
+- `prices.json` (tracked items + history)
+- `settings.json` (lists, alert rules, interval, notification settings)
+- `diagnostics.json`
+- `audit.json`
+
+Scheduled backups are saved to the `backups/` directory.
+
+Current backup format is a full-state snapshot containing:
+
+- `items`
+- `settings`
+- `diagnostics`
+- `audit`
+
+In-app restore supports both full-state snapshots and legacy item-only backups.
 
 ## License
 
-Released under the [MIT License](https://github.com/aloglu/centsible/blob/main/LICENSE).
+[MIT](https://github.com/aloglu/centsible/blob/main/LICENSE)

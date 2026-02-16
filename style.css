@@ -45,8 +45,12 @@ body {
     display: flex;
     flex-direction: column;
     overflow-x: hidden;
-    /* Rich, deep linear subtle gradient for depth */
-    background: radial-gradient(circle at 50% 0%, #18181b 0%, var(--bg-color) 70%);
+    /* Smooth layered background to avoid hard banding near the lower viewport. */
+    background-image:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.012) 28%, rgba(0, 0, 0, 0) 58%),
+        radial-gradient(120% 60% at 50% -18%, rgba(255, 255, 255, 0.055) 0%, rgba(0, 0, 0, 0) 68%);
+    background-repeat: no-repeat;
+    background-color: var(--bg-color);
 }
 
 /* typography */
@@ -506,6 +510,35 @@ input:focus {
     border-color: var(--accent);
 }
 
+.add-item-list-select {
+    flex: 0.2 1 150px;
+}
+
+.add-item-list-select .custom-select-trigger {
+    width: 100%;
+    min-height: 0;
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    justify-content: flex-start;
+    gap: 0.35rem;
+}
+
+.add-item-list-select .custom-select-trigger svg {
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.add-item-list-select .custom-select-trigger:hover {
+    background: rgba(0, 0, 0, 0.3);
+    border-color: var(--border);
+}
+
+.add-item-list-select .custom-select-trigger:focus {
+    border-color: var(--accent);
+}
+
 /* Hide number input spinners (scrollbar-like artifacts) */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
@@ -727,7 +760,7 @@ input[type="number"] {
     border-radius: 0.45rem;
     padding: 0.55rem 0.65rem;
     background: rgba(255, 255, 255, 0.02);
-    font-size: 0.8rem;
+    font-size: 0.84rem;
 }
 
 .diag-row.ok {
@@ -739,7 +772,7 @@ input[type="number"] {
 }
 
 .diag-meta {
-    font-size: 0.72rem;
+    font-size: 0.76rem;
     color: var(--text-muted);
     margin-top: 0.15rem;
 }
@@ -756,9 +789,50 @@ input[type="number"] {
     margin: 0;
 }
 
+.panel-head-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
 .panel-head button {
     padding: 0.28rem 0.62rem;
     font-size: 0.72rem;
+}
+
+.collapse-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 0.45rem;
+}
+
+.collapse-toggle-btn svg {
+    transition: transform 0.16s ease;
+}
+
+.system-activity-section .system-activity-body {
+    overflow: hidden;
+    max-height: 2000px;
+    opacity: 1;
+    transition: max-height 0.18s ease, opacity 0.14s ease;
+}
+
+.system-activity-section.collapsed .system-activity-body {
+    max-height: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.system-activity-section.collapsed .collapse-toggle-btn svg {
+    transform: rotate(-90deg);
+}
+
+.system-activity-section .panel-head-actions button:not(.collapse-toggle-btn) {
+    font-size: 0.92rem;
 }
 
 .lab-subtitle {
@@ -849,12 +923,12 @@ input[type="number"] {
 }
 
 .alert-title {
-    font-size: 0.86rem;
+    font-size: 0.9rem;
     color: var(--text-main);
 }
 
 .alert-meta {
-    font-size: 0.72rem;
+    font-size: 0.76rem;
     color: var(--text-muted);
     margin-top: 0.2rem;
 }
@@ -870,6 +944,78 @@ input[type="number"] {
 .alert-row.ok {
     border-left-color: var(--success);
     cursor: default;
+}
+
+.audit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.audit-row {
+    border: 1px solid var(--border);
+    border-left: 3px solid rgba(56, 189, 248, 0.45);
+    border-radius: 0.45rem;
+    padding: 0.55rem 0.65rem;
+    background: rgba(255, 255, 255, 0.02);
+    font-size: 0.84rem;
+}
+
+.audit-title {
+    color: var(--text-main);
+    font-size: 0.9rem;
+}
+
+.audit-meta {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    margin-top: 0.15rem;
+}
+
+.purchased-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.purchased-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid rgba(52, 211, 153, 0.5);
+    border-radius: 0.45rem;
+    padding: 0.62rem 0.7rem;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.purchased-main {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.purchased-title {
+    color: var(--text-main);
+    font-size: 0.9rem;
+}
+
+.purchased-meta {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    margin-top: 0.15rem;
+}
+
+.purchased-actions {
+    display: flex;
+    gap: 0.45rem;
+    flex: 0 0 auto;
+    align-items: center;
+    margin-top: 0;
 }
 
 /* Product Grid */
@@ -1345,6 +1491,10 @@ input[type="number"] {
 
 .actions-menu-item.danger:hover {
     color: var(--danger);
+}
+
+.actions-menu-item.success:hover {
+    color: var(--success);
 }
 
 .card.price-drop {

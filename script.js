@@ -301,10 +301,16 @@ class App {
         this.activeView = 'portfolio';
         this.commandResults = [];
         this.commandSelectionIndex = 0;
+        this.auditEntries = [];
         this.refreshPollTimer = null;
         this.itemCheckFlashUntil = new Map();
         this.localCheckingItemIds = new Set();
         this.remoteCheckingItemId = null;
+        this.systemActivitySections = {
+            queue: true,
+            diagnostics: true,
+            audit: true
+        };
         this.currencyNames = {
             USD: 'us dollar',
             EUR: 'euro',
@@ -347,17 +353,18 @@ class App {
     async init() {
         this.setupInputs();
         this.loadUiPreferences();
+        this.applySystemActivitySectionStates();
         await Promise.all([
             this.loadSettings(),
             this.loadFromServer(),
             this.fetchRates(),
             this.loadLists(),
-            this.loadAlertRules()
+            this.loadAlertRules(),
+            this.loadAuditLog()
         ]);
 
         this.switchView(this.activeView || 'portfolio');
         this.render();
-        this.renderSelectors();
         this.renderListControls();
         this.fillAlertRulesForm();
         this.syncCheckIntervalUI();
@@ -412,6 +419,35 @@ class App {
         this.setupGlobalShortcuts();
         this.setupCommandPalette();
         this.setupListsManagerBindings();
+    }
+
+    toggleSystemActivitySection(event, section) {
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        const isExpanded = this.systemActivitySections[section] !== false;
+        this.systemActivitySections[section] = !isExpanded;
+        this.applySystemActivitySectionStates();
+    }
+
+    applySystemActivitySectionStates() {
+        const sectionIds = {
+            queue: 'systemSectionQueue',
+            diagnostics: 'systemSectionDiagnostics',
+            audit: 'systemSectionAudit'
+        };
+        Object.entries(sectionIds).forEach(([key, id]) => {
+            const sectionEl = document.getElementById(id);
+            if (!sectionEl) return;
+            const isExpanded = this.systemActivitySections[key] !== false;
+            sectionEl.classList.toggle('collapsed', !isExpanded);
+            const toggleBtn = sectionEl.querySelector('.collapse-toggle-btn');
+            if (toggleBtn) {
+                toggleBtn.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+                toggleBtn.setAttribute('title', isExpanded ? 'Collapse section' : 'Expand section');
+            }
+        });
     }
 
     loadUiPreferences() {
@@ -522,6 +558,86 @@ class App {
         return `${clamped}%`;
     }
 
+    normalizeTrackedUrl(rawUrl) {
+        try {
+            const u = new URL(String(rawUrl || '').trim());
+            u.hash = '';
+            const drop = new Set([
+                'fbclid', 'gclid', 'msclkid', '_ga', '_gl', 'mc_cid', 'mc_eid',
+                '_pos', '_sid', '_ss', 'ref', 'ref_'
+            ]);
+            Array.from(u.searchParams.keys()).forEach((key) => {
+                const k = String(key || '').toLowerCase();
+                if (k.startsWith('utm_') || k.startsWith('pf_rd_') || k.startsWith('pd_rd_') || drop.has(k)) {
+                    u.searchParams.delete(key);
+                }
+            });
+            return u.toString().replace(/\/+$/, '');
+        } catch {
+            return String(rawUrl || '').trim();
+        }
+    }
+
+    async logAction(action, details = {}) {
+        try {
+            await fetch(`${this.SERVER_URL}/audit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action, details, source: 'ui' })
+            });
+            if (this.activeView === 'audit') await this.loadAuditLog({ silent: true });
+        } catch (_) { }
+    }
+
+    async loadAuditLog(options = {}) {
+        const silent = Boolean(options.silent);
+        try {
+            const res = await fetch(`${this.SERVER_URL}/audit?limit=400`);
+            if (!res.ok) throw new Error('Failed to load audit log');
+            const data = await res.json();
+            this.auditEntries = Array.isArray(data.entries) ? data.entries : [];
+            if (this.activeView === 'audit') this.renderAuditPanel();
+        } catch (e) {
+            if (!silent) console.warn('Could not load audit log', e);
+            this.auditEntries = [];
+        }
+    }
+
+    renderAuditPanel() {
+        const list = document.getElementById('auditList');
+        if (!list) return;
+        if (!this.auditEntries.length) {
+            list.innerHTML = '<div class="audit-row"><div class="audit-title">No audit entries yet.</div><div class="audit-meta">User actions will appear here.</div></div>';
+            return;
+        }
+        list.innerHTML = this.auditEntries.map((e) => {
+            const action = this.escapeHtml(String(e.action || 'unknown'));
+            const when = e.time ? new Date(e.time).toLocaleString() : 'n/a';
+            const details = e.details && typeof e.details === 'object'
+                ? this.escapeHtml(Object.entries(e.details).slice(0, 5).map(([k, v]) => `${k}: ${String(v)}`).join(' | '))
+                : '';
+            return `
+                <div class="audit-row">
+                    <div class="audit-title">${action}</div>
+                    <div class="audit-meta">${when}${details ? ` | ${details}` : ''}</div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async clearAuditLog() {
+        try {
+            const res = await fetch(`${this.SERVER_URL}/audit`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Failed to clear audit log');
+            this.auditEntries = [];
+            this.renderAuditPanel();
+            this.showToast('Audit log cleared', 'success');
+            this.logAction('audit.cleared');
+        } catch (e) {
+            this.showToast(e.message || 'Failed to clear audit log', 'error');
+        }
+    }
+
     // --- Server Communications ---
 
     getItemsSignature(items) {
@@ -540,6 +656,8 @@ class App {
                 item.extractionConfidence || '',
                 item.selector || '',
                 item.listId || '',
+                item.purchased ? '1' : '0',
+                item.purchasedAt || '',
                 item.history ? item.history.length : 0,
                 lastHist ? lastHist.price : '',
                 lastHist ? lastHist.date : ''
@@ -560,6 +678,9 @@ class App {
             incomingItems = incomingItems.map(item => ({
                 ...item,
                 listId: item.listId || fallbackListId,
+                canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
+                purchased: Boolean(item.purchased),
+                purchasedAt: item.purchasedAt || null,
                 stockStatus: item.stockStatus || 'unknown',
                 stockReason: item.stockReason || '',
                 stockConfidence: Number(item.stockConfidence || 0),
@@ -649,6 +770,9 @@ class App {
                 this.items = incomingItems.map(item => ({
                     ...item,
                     listId: item.listId || 'default',
+                    canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
+                    purchased: Boolean(item.purchased),
+                    purchasedAt: item.purchasedAt || null,
                     stockStatus: item.stockStatus || 'unknown',
                     stockReason: item.stockReason || '',
                     stockConfidence: Number(item.stockConfidence || 0),
@@ -777,6 +901,10 @@ class App {
             this.settings = { ...this.settings, ...payload };
             this.syncCheckIntervalUI();
             this.showToast(`Check interval set to ${this.formatCheckInterval(payload.checkIntervalMs)}`, 'success');
+            this.logAction('settings.check_interval_changed', {
+                checkIntervalMs: payload.checkIntervalMs,
+                preset: payload.checkIntervalPreset
+            });
             return true;
         } catch (e) {
             console.error('Failed to save check interval:', e);
@@ -849,6 +977,28 @@ class App {
         if (menu) menu.classList.remove('active');
     }
 
+    toggleAddItemListMenu(event) {
+        if (event) event.stopPropagation();
+        const menu = document.getElementById('addItemListMenu');
+        if (!menu) return;
+        this.closeIntervalMenu();
+        this.closeCustomIntervalUnitMenu();
+        menu.classList.toggle('active');
+    }
+
+    closeAddItemListMenu() {
+        const menu = document.getElementById('addItemListMenu');
+        if (menu) menu.classList.remove('active');
+    }
+
+    selectAddItemList(listId) {
+        const selected = this.lists.some(l => l.id === listId) ? listId : 'default';
+        this.newItemListId = selected;
+        localStorage.setItem('pt_new_item_list', this.newItemListId);
+        this.logAction('list.add_item_target_changed', { listId: selected });
+        this.closeAddItemListMenu();
+    }
+
     selectIntervalOption(value) {
         this.closeIntervalMenu();
         this.handleCheckIntervalChange(value);
@@ -901,6 +1051,11 @@ class App {
             });
             if (res.ok) {
                 this.showToast('Settings saved!', 'success');
+                this.logAction('settings.saved', {
+                    hasDiscordWebhook: Boolean(discord),
+                    hasTelegramBot: Boolean(tgBot),
+                    hasTelegramChatId: Boolean(tgChat)
+                });
                 this.closeSettingsModal();
             }
         } catch (e) {
@@ -937,13 +1092,30 @@ class App {
     }
 
     async testNotification(type) {
+        const discord = document.getElementById('discordWebhookInput')?.value.trim() || '';
+        const tgBot = document.getElementById('telegramWebhookInput')?.value.trim() || '';
+        const tgChat = document.getElementById('telegramChatIdInput')?.value.trim() || '';
         try {
-            await fetch(`${this.SERVER_URL}/test-notification`, {
+            const res = await fetch(`${this.SERVER_URL}/test-notification`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type })
+                body: JSON.stringify({
+                    type,
+                    settings: {
+                        discordWebhook: discord,
+                        telegramWebhook: tgBot,
+                        telegramChatId: tgChat
+                    }
+                })
             });
+            if (!res.ok) throw new Error('Test request failed');
             this.showToast(`Test ${type} alert sent!`, 'success');
+            this.logAction('settings.test_notification', {
+                type,
+                hasDiscordWebhook: Boolean(discord),
+                hasTelegramBot: Boolean(tgBot),
+                hasTelegramChatId: Boolean(tgChat)
+            });
         } catch (e) {
             console.error('Failed to send test notification:', e);
             this.showToast('Failed to send test alert', 'error');
@@ -967,6 +1139,7 @@ class App {
     renderListControls() {
         const activeFilter = document.getElementById('activeListFilter');
         const optionLabel = (l) => `${l.name}${Number(l.itemCount || 0) ? ` (${l.itemCount})` : ''}`;
+        this.renderAddItemListSelect();
         if (activeFilter) {
             activeFilter.innerHTML = [
                 `<option value="all">All Lists</option>`,
@@ -995,6 +1168,7 @@ class App {
             this.lists = data.lists || this.lists;
             this.renderListControls();
             this.showToast('List created', 'success');
+            this.logAction('list.created', { name: name.trim() });
         } catch (e) {
             this.showToast(e.message, 'error');
         }
@@ -1043,6 +1217,7 @@ class App {
             this.renderListControls();
             this.renderListsManager();
             this.showToast('List created', 'success');
+            this.logAction('list.created', { name });
             this.render();
         } catch (e) {
             this.showToast(e.message, 'error');
@@ -1067,6 +1242,7 @@ class App {
             this.renderListsManager();
             this.render();
             this.showToast('List renamed', 'success');
+            this.logAction('list.renamed', { listId, name: name.trim() });
         } catch (e) {
             this.showToast(e.message, 'error');
         }
@@ -1102,6 +1278,7 @@ class App {
             this.renderListsManager();
             this.render();
             this.showToast('List deleted', 'success');
+            this.logAction('list.deleted', { listId, name: list.name });
         } catch (e) {
             this.showToast(e.message, 'error');
         }
@@ -1112,6 +1289,7 @@ class App {
         localStorage.setItem('pt_active_list', this.activeListId);
         this.renderListControls();
         this.render();
+        this.logAction('list.filter_changed', { listId });
     }
 
     setDefaultNewItemList(listId) {
@@ -1119,6 +1297,7 @@ class App {
         localStorage.setItem('pt_new_item_list', this.newItemListId);
         this.renderListControls();
         this.showToast('Default new-item list updated', 'success');
+        this.logAction('list.default_new_item_changed', { listId });
     }
 
     renderListsManager() {
@@ -1214,6 +1393,11 @@ class App {
             if (!res.ok) throw new Error(data.error || 'Failed to save rules');
             this.alertRules = { ...this.alertRules, ...(data.alertRules || payload) };
             this.showToast('Alert rules saved', 'success');
+            this.logAction('alert_rules.saved', {
+                lowConfidenceThreshold: this.alertRules.lowConfidenceThreshold,
+                staleHours: this.alertRules.staleHours,
+                notifyCooldownMinutes: this.alertRules.notifyCooldownMinutes
+            });
             this.renderAlertsPanel();
         } catch (e) {
             this.showToast(e.message, 'error');
@@ -1251,6 +1435,7 @@ class App {
             if (!res.ok) throw new Error(data.error || 'Failed to clear diagnostics');
             await this.renderDiagnosticsPanel();
             this.showToast('Diagnostics cleared', 'success');
+            this.logAction('diagnostics.cleared');
         } catch (e) {
             this.showToast(e.message || 'Failed to clear diagnostics', 'error');
         }
@@ -1352,12 +1537,11 @@ class App {
 
     setupInputs() {
         const urlInp = document.getElementById('urlInput');
-        const selInp = document.getElementById('selectorInput');
         const nameInp = document.getElementById('nameInput');
         const targetInp = document.getElementById('targetPriceInput');
 
         // Enter key handler
-        [urlInp, selInp, nameInp, targetInp].forEach(input => {
+        [urlInp, nameInp, targetInp].forEach(input => {
             if (input) {
                 input.addEventListener('keyup', (e) => {
                     if (e.key === 'Enter') this.addItem();
@@ -1374,6 +1558,13 @@ class App {
                 });
             }
         });
+
+        const newListNameInput = document.getElementById('newListNameInput');
+        if (newListNameInput) {
+            newListNameInput.addEventListener('keyup', (e) => {
+                if (e.key === 'Enter') this.createListFromModal();
+            });
+        }
 
         if (labUrl) {
             let shouldSelectAllOnFocus = true;
@@ -1455,6 +1646,8 @@ class App {
         const base = [
             { label: 'Go to Portfolio', meta: 'View', action: () => this.switchView('portfolio') },
             { label: 'Go to Alerts', meta: 'View', action: () => this.switchView('alerts') },
+            { label: 'Go to System Activity', meta: 'View', action: () => this.switchView('audit') },
+            { label: 'Go to Purchased', meta: 'View', action: () => this.switchView('purchased') },
             { label: 'Go to Extractor Lab', meta: 'View', action: () => this.switchView('extractor') },
             {
                 label: 'Show All Items',
@@ -1590,23 +1783,32 @@ class App {
         modal.style.pointerEvents = 'none';
     }
 
-    renderSelectors() {
-        const list = document.getElementById('selector-history');
-        list.innerHTML = this.selectorHistory.map(sel => `<option value="${sel}">`).join('');
+    renderAddItemListSelect() {
+        const menu = document.getElementById('addItemListMenu');
+        const label = document.getElementById('addItemListTriggerLabel');
+        if (!menu) return;
+        const fallbackId = (this.lists[0] && this.lists[0].id) || 'default';
+        const selected = this.lists.some(l => l.id === this.newItemListId) ? this.newItemListId : fallbackId;
+        this.newItemListId = selected;
+        localStorage.setItem('pt_new_item_list', this.newItemListId);
+        if (label) label.textContent = 'Add to';
+        menu.innerHTML = this.lists.map(l => `
+            <button type="button" class="custom-select-option" onclick="app.selectAddItemList('${l.id}')">${this.escapeHtml(l.name)}</button>
+        `).join('');
     }
 
     // --- Core Functionality ---
 
     async addItem() {
         const urlInp = document.getElementById('urlInput');
-        const selInp = document.getElementById('selectorInput');
         const nameInp = document.getElementById('nameInput');
         const targetInp = document.getElementById('targetPriceInput'); // New Input
 
         const url = urlInp.value.trim();
-        const selector = selInp.value.trim();
         const name = nameInp.value.trim();
+        const selectedListId = this.newItemListId || 'default';
         const targetPrice = parseFloat(targetInp?.value) || null;
+        const canonicalUrl = this.normalizeTrackedUrl(url);
 
         if (!url) {
             this.showToast("Please enter a URL", "error");
@@ -1619,25 +1821,28 @@ class App {
 
         try {
             // Check if already exists
-            if (this.items.some(i => i.url === url)) {
+            if (this.items.some(i => this.normalizeTrackedUrl(i.canonicalUrl || i.url) === canonicalUrl)) {
                 throw new Error("Item already tracked!");
             }
 
             // Initial Scrape
-            const initialData = await this.scrapePrice(url, selector);
+            const initialData = await this.scrapePrice(url, null);
             const initialAvailability = initialData?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
             const isInitialOutOfStock = initialAvailability.status === 'out_of_stock';
             if (!initialData || (initialData.price === null && !isInitialOutOfStock)) {
-                throw new Error("Could not scrape price. Try a custom selector?");
+                throw new Error("Could not scrape price. Try this URL in Extractor Lab.");
             }
             const initialPrice = initialData.price !== null ? Number(initialData.price) : null;
 
             const newItem = {
                 id: Date.now().toString(),
                 url,
-                selector: selector || initialData.selectorUsed || null,
+                canonicalUrl,
+                selector: initialData.selectorUsed || null,
                 name: name || initialData.title || new URL(url).hostname,
-                listId: this.newItemListId || (this.lists[0] && this.lists[0].id) || 'default',
+                listId: selectedListId || this.newItemListId || (this.lists[0] && this.lists[0].id) || 'default',
+                purchased: false,
+                purchasedAt: null,
                 currentPrice: initialPrice,
                 currency: initialData.currency,
                 originalPrice: initialPrice,
@@ -1659,12 +1864,12 @@ class App {
 
             this.items.push(newItem);
             await this.saveToServer();
+            this.logAction('item.added', { itemId: newItem.id, name: newItem.name, listId: newItem.listId });
             this.render();
             this.showToast(isInitialOutOfStock ? "Item Added (currently out of stock)" : "Item Added!", "success");
 
             // Clear inputs
             urlInp.value = '';
-            selInp.value = '';
             nameInp.value = '';
             if (targetInp) targetInp.value = '';
 
@@ -1680,8 +1885,10 @@ class App {
     async deleteItem(id) {
         this.closeAllMenus();
         if (!confirm("Are you sure you want to stop tracking this item?")) return;
+        const deletedItem = this.items.find(i => i.id === id);
         this.items = this.items.filter(i => i.id !== id);
         await this.saveToServer();
+        this.logAction('item.deleted', { itemId: id, name: deletedItem?.name || '' });
         this.render();
         this.showToast("Item Removed", "success");
     }
@@ -1700,11 +1907,28 @@ class App {
         }
         item.listId = targetListId;
         await this.saveToServer();
+        this.logAction('item.moved_list', { itemId: id, toListId: targetListId, toListName: list.name });
         await this.loadLists();
         this.renderListControls();
         this.render();
         this.closeAllMenus();
         this.showToast(`Moved to ${list.name}`, 'success');
+    }
+
+    async togglePurchased(id) {
+        const item = this.items.find(i => i.id === id);
+        if (!item) return;
+        const next = !Boolean(item.purchased);
+        item.purchased = next;
+        item.purchasedAt = next ? new Date().toISOString() : null;
+        await this.saveToServer();
+        this.logAction(next ? 'item.marked_purchased' : 'item.unmarked_purchased', {
+            itemId: item.id,
+            name: item.name
+        });
+        this.closeAllMenus();
+        this.render();
+        this.showToast(next ? `${item.name} marked as purchased` : `${item.name} marked as not purchased`, 'success');
     }
 
     async refreshItem(id) {
@@ -1716,6 +1940,7 @@ class App {
             const extracted = await this.scrapePrice(item.url, item.selector);
             const price = extracted ? extracted.price : null;
             const availability = extracted?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
+            const previousStockStatus = String(item.stockStatus || 'unknown');
             const stockStatus = availability.status || (price !== null ? 'in_stock' : 'unknown');
             const isOutOfStock = stockStatus === 'out_of_stock';
 
@@ -1733,6 +1958,15 @@ class App {
                 item.stockConfidence = Number(availability.confidence || 0);
                 item.stockReason = availability.reason || '';
                 item.stockSource = availability.source || null;
+                if (previousStockStatus !== 'out_of_stock' && stockStatus === 'out_of_stock') {
+                    item.stockChangedAt = new Date().toISOString();
+                    item.stockTransition = 'out_of_stock';
+                } else if (previousStockStatus === 'out_of_stock' && stockStatus === 'in_stock') {
+                    item.stockChangedAt = new Date().toISOString();
+                    item.stockTransition = 'back_in_stock';
+                } else {
+                    item.stockTransition = null;
+                }
                 item.lastChecked = new Date().toISOString();
                 item.lastCheckAttempt = new Date().toISOString();
                 item.lastCheckStatus = 'ok';
@@ -1754,8 +1988,10 @@ class App {
                 await this.saveToServer(); // Save immediately
                 this.render(); // Re-render to show updates
 
-                if (isOutOfStock) {
+                if (previousStockStatus !== 'out_of_stock' && isOutOfStock) {
                     this.showToast(`${item.name} is out of stock`, "error");
+                } else if (previousStockStatus === 'out_of_stock' && stockStatus === 'in_stock') {
+                    this.showToast(`${item.name} is back in stock`, "success");
                 } else if (price < oldPrice) {
                     this.showToast(`Price drop! ${item.name}`, "success");
                 } else if (price > oldPrice) {
@@ -1763,6 +1999,11 @@ class App {
                 } else {
                     this.showToast(`Updated: ${item.name}`, "success");
                 }
+                this.logAction('item.refreshed', {
+                    itemId: item.id,
+                    stockStatus: stockStatus,
+                    price: price !== null ? Number(price) : null
+                });
             } else {
                 throw new Error("Could not find price");
             }
@@ -1791,6 +2032,7 @@ class App {
         try {
             await fetch(`${this.SERVER_URL}/check-now`, { method: 'POST' });
             this.showToast('Background check started...', 'success');
+            this.logAction('check.started_manual');
             this.startRefreshStatusPolling();
         } catch (e) {
             this.showToast('Failed to trigger background check', 'error');
@@ -1808,8 +2050,15 @@ class App {
     }
 
     getVisibleItems() {
-        if (!this.activeListId || this.activeListId === 'all') return [...this.items];
-        return this.items.filter(item => (item.listId || 'default') === this.activeListId);
+        const activeItems = this.items.filter(item => !item.purchased);
+        if (!this.activeListId || this.activeListId === 'all') return [...activeItems];
+        return activeItems.filter(item => (item.listId || 'default') === this.activeListId);
+    }
+
+    getPurchasedItems() {
+        return this.items
+            .filter(item => Boolean(item.purchased))
+            .sort((a, b) => new Date(b.purchasedAt || 0) - new Date(a.purchasedAt || 0));
     }
 
     getListName(listId) {
@@ -2071,6 +2320,7 @@ class App {
         const hoursSince = lastChecked ? (now - lastChecked) / 3600000 : 999;
         const conf = Number(item.extractionConfidence || 0);
         if (item.stockStatus === 'out_of_stock') return { text: 'OOS', className: 'status-oos' };
+        if (item.purchased) return { text: 'Purchased', className: 'status-ok' };
         if (item.targetPrice && item.currentPrice <= item.targetPrice) return { text: 'Target Hit', className: 'status-hit' };
         if (!item.currentPrice) return { text: 'No Price', className: 'status-issue' };
         if (hoursSince > 6) return { text: 'Stale', className: 'status-stale' };
@@ -2089,7 +2339,9 @@ class App {
         const map = {
             portfolio: document.getElementById('portfolioPanel'),
             alerts: document.getElementById('alertsPanel'),
-            extractor: document.getElementById('extractorPanel')
+            extractor: document.getElementById('extractorPanel'),
+            audit: document.getElementById('auditPanel'),
+            purchased: document.getElementById('purchasedPanel')
         };
         Object.entries(map).forEach(([k, el]) => {
             if (!el) return;
@@ -2097,8 +2349,17 @@ class App {
         });
         if (view === 'alerts') {
             this.fillAlertRulesForm();
+            return;
+        }
+        if (view === 'audit') {
             this.renderAlertsPanel();
             this.renderDiagnosticsPanel();
+            this.loadAuditLog({ silent: true });
+            this.renderAuditPanel();
+            return;
+        }
+        if (view === 'purchased') {
+            this.renderPurchasedPanel();
         }
     }
 
@@ -2149,6 +2410,24 @@ class App {
         items.forEach(item => {
             const alertTime = item.lastChecked || item.lastCheckAttempt || null;
             const listName = this.getListName(item.listId || 'default');
+            if (item.stockTransition === 'back_in_stock') {
+                pushAlert({
+                    severity: 'info',
+                    title: `${item.name}: back in stock`,
+                    meta: `${item.stockChangedAt ? new Date(item.stockChangedAt).toLocaleString() : 'n/a'} | ${listName}`,
+                    id: item.id,
+                    time: item.stockChangedAt || alertTime
+                });
+            }
+            if (item.stockTransition === 'out_of_stock') {
+                pushAlert({
+                    severity: 'warning',
+                    title: `${item.name}: went out of stock`,
+                    meta: `${item.stockChangedAt ? new Date(item.stockChangedAt).toLocaleString() : 'n/a'} | ${listName}${item.stockReason ? ` | ${item.stockReason}` : ''}`,
+                    id: item.id,
+                    time: item.stockChangedAt || alertTime
+                });
+            }
             if (rules.targetHitEnabled && item.stockStatus !== 'out_of_stock' && item.targetPrice && item.currentPrice <= item.targetPrice) {
                 pushAlert({
                     severity: 'critical',
@@ -2215,6 +2494,33 @@ class App {
             <div class="alert-row ${a.severity}" onclick="app.showHistoryModal('${a.id}')">
                 <div class="alert-title">${this.escapeHtml(a.title)}</div>
                 <div class="alert-meta">${this.escapeHtml(a.meta || '')}</div>
+            </div>
+        `).join('');
+    }
+
+    renderPurchasedPanel() {
+        const list = document.getElementById('purchasedList');
+        if (!list) return;
+        const items = this.getPurchasedItems();
+        if (!items.length) {
+            list.innerHTML = '<div class="purchased-row"><div class="purchased-title">No purchased items yet.</div><div class="purchased-meta">Use More Actions -> Mark as Purchased to archive items here.</div></div>';
+            return;
+        }
+
+        list.innerHTML = items.map((item) => `
+            <div class="purchased-row">
+                <div class="purchased-main">
+                    <div class="purchased-title">${this.escapeHtml(item.name)}</div>
+                    <div class="purchased-meta">
+                        ${item.purchasedAt ? new Date(item.purchasedAt).toLocaleString() : 'n/a'} | ${this.escapeHtml(this.getListName(item.listId || 'default'))}
+                        ${item.currentPrice ? ` | ${this.formatPrice(item.currentPrice, this.getCurrency(item))}` : ''}
+                    </div>
+                </div>
+                <div class="purchased-actions">
+                    <button class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem;" onclick="app.togglePurchased('${item.id}')">Restore</button>
+                    <a class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem; text-decoration:none; display:inline-flex;" href="${this.escapeHtml(item.url)}" target="_blank" rel="noopener">Open</a>
+                    <button class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem; border-color: rgba(248,113,113,0.4); color: var(--danger);" onclick="app.deleteItem('${item.id}')">Remove</button>
+                </div>
             </div>
         `).join('');
     }
@@ -2316,6 +2622,7 @@ class App {
                 .filter(l => l.id !== (item.listId || 'default'))
                 .map(l => `<button class="actions-menu-item" onclick="event.stopPropagation(); app.moveItemToList('${item.id}','${l.id}')">${l.name}</button>`)
                 .join('');
+            const purchaseActionLabel = item.purchased ? 'Mark as Not Purchased' : 'Mark as Purchased';
             const lastCheckMeta = this.getLastCheckMeta(item);
             const priceCellHtml = stockMeta.isOut
                 ? `<div class="stock-warning" title="${this.escapeHtml(stockMeta.title)}">Out of Stock</div>${item.currentPrice ? `<div class="stock-last-price">Last seen: ${priceStr}</div>` : ''}`
@@ -2378,6 +2685,12 @@ class App {
                                 ${moveToOptions || '<div class="actions-menu-item" style="cursor:default; opacity:0.7;">No other lists</div>'}
                             </div>
                         </div>
+                        <button class="actions-menu-item success" onclick="event.stopPropagation(); app.togglePurchased('${item.id}')">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path d="M5 13l4 4L19 7" />
+                            </svg>
+                            <span class="actions-menu-label">${purchaseActionLabel}</span>
+                        </button>
                         <button class="actions-menu-item danger" onclick="event.stopPropagation(); app.deleteItem('${item.id}')">
                             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                             <span class="actions-menu-label">Remove Item</span>
@@ -2401,7 +2714,7 @@ class App {
                 checkedCell.style.cursor = 'pointer';
                 checkedCell.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    this.switchView('alerts');
+                    this.switchView('audit');
                     this.renderDiagnosticsPanel();
                 });
             }
@@ -2411,8 +2724,10 @@ class App {
         this.renderListControls();
         this.refreshDashboardMetrics();
         this.renderAlertsPanel();
-        if (this.activeView === 'alerts') {
+        if (this.activeView === 'audit') {
             this.renderDiagnosticsPanel();
+        } else if (this.activeView === 'purchased') {
+            this.renderPurchasedPanel();
         }
         this.applyCheckingHighlights();
     }
@@ -2662,6 +2977,7 @@ class App {
         anchor.click();
         anchor.remove();
         this.showToast("JSON Exported");
+        this.logAction('export.json', { itemCount: this.items.length });
     }
 
     exportToCSV() {
@@ -2690,6 +3006,7 @@ class App {
         link.click();
         link.remove();
         this.showToast("CSV Exported");
+        this.logAction('export.csv', { itemCount: this.items.length });
     }
 
     handleImport(event) {
@@ -2701,10 +3018,16 @@ class App {
                 const imported = JSON.parse(e.target.result);
                 if (Array.isArray(imported)) {
                     if (confirm(`Are you sure you want to import ${imported.length} items? This will REPLACE your current list.`)) {
-                        this.items = imported;
+                        this.items = imported.map(item => ({
+                            ...item,
+                            canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
+                            purchased: Boolean(item.purchased),
+                            purchasedAt: item.purchasedAt || null
+                        }));
                         await this.saveToServer();
                         this.render();
                         this.showToast("Data Imported Successfully");
+                        this.logAction('import.json_replace', { itemCount: imported.length });
                     }
                 } else {
                     throw new Error("Invalid Format");
@@ -2746,6 +3069,9 @@ class App {
                         <div class="backup-date">
                             Items: ${b.preview && b.preview.itemCount !== null ? b.preview.itemCount : 'n/a'}
                             | Lists: ${b.preview && b.preview.listCount !== null ? b.preview.listCount : 'n/a'}
+                            | Purchased: ${b.preview && b.preview.purchasedCount !== null ? b.preview.purchasedCount : 'n/a'}
+                            | Audit: ${b.preview && b.preview.auditCount !== null ? b.preview.auditCount : 'n/a'}
+                            | Diagnostics: ${b.preview && b.preview.diagnosticsCount !== null ? b.preview.diagnosticsCount : 'n/a'}
                             | Range: ${b.preview && b.preview.rangeStart ? this.formatDate(b.preview.rangeStart) : '-'} -> ${b.preview && b.preview.rangeEnd ? this.formatDate(b.preview.rangeEnd) : '-'}
                         </div>
                     </div>
@@ -2906,6 +3232,7 @@ class App {
                 this.items[idx] = data.item;
 
                 this.showToast('Selector updated!', 'success');
+                this.logAction('item.edited', { itemId: item.id, name, url });
                 this.closeDoctorModal();
                 this.render();
             }
@@ -2921,7 +3248,7 @@ class App {
             if (previewRes.ok) {
                 const previewData = await previewRes.json();
                 const p = previewData.preview || {};
-                previewText = `\nItems: ${p.itemCount ?? 'n/a'} | Lists: ${p.listCount ?? 'n/a'} | Range: ${p.rangeStart ? this.formatDate(p.rangeStart) : '-'} -> ${p.rangeEnd ? this.formatDate(p.rangeEnd) : '-'}`;
+                previewText = `\nItems: ${p.itemCount ?? 'n/a'} | Lists: ${p.listCount ?? 'n/a'} | Purchased: ${p.purchasedCount ?? 'n/a'} | Audit: ${p.auditCount ?? 'n/a'} | Diagnostics: ${p.diagnosticsCount ?? 'n/a'} | Range: ${p.rangeStart ? this.formatDate(p.rangeStart) : '-'} -> ${p.rangeEnd ? this.formatDate(p.rangeEnd) : '-'}`;
             }
         } catch { }
         if (!confirm(`Are you sure you want to restore from ${filename}? This will overwrite your current prices and history.${previewText}`)) return;
@@ -2935,9 +3262,18 @@ class App {
             const result = await response.json();
             if (result.success) {
                 this.showToast("Backup restored successfully!");
-                await this.loadFromServer();
+                await Promise.all([
+                    this.loadFromServer(),
+                    this.loadSettings(),
+                    this.loadLists(),
+                    this.loadAlertRules()
+                ]);
+                this.renderListControls();
+                this.fillAlertRulesForm();
+                this.syncCheckIntervalUI();
                 this.render();
                 this.closeBackupsModal();
+                this.logAction('backup.restored', { filename });
             } else {
                 throw new Error(result.error);
             }
@@ -2993,6 +3329,7 @@ class App {
         document.querySelectorAll('.list-item.menu-open').forEach(r => r.classList.remove('menu-open'));
         this.closeIntervalMenu();
         this.closeCustomIntervalUnitMenu();
+        this.closeAddItemListMenu();
     }
 }
 
