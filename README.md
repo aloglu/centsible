@@ -93,4 +93,4 @@ In-app restore supports both full-state snapshots and legacy item-only backups.
 
 ## License
 
-[MIT](https://github.com/aloglu/centsible/blob/main/LICENSE)
+Released under the [MIT License](https://github.com/aloglu/centsible/blob/main/LICENSE).
