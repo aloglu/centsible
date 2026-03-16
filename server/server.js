@@ -1562,6 +1562,7 @@ async function checkPrices() {
     const rules = getAlertRules();
 
     for (let item of items) {
+        if (Boolean(item.purchased)) continue;
         checkingItemId = item.id;
         const nowIso = new Date().toISOString();
         const nowTs = Date.now();

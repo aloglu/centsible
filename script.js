@@ -325,6 +325,7 @@ class App {
         this.lists = [{ id: 'default', name: 'Default' }];
         this.activeListId = 'all';
         this.newItemListId = 'default';
+        this.pendingAddItemListId = null;
         this.alertRules = {
             targetHitEnabled: true,
             priceDropEnabled: true,
@@ -380,6 +381,10 @@ class App {
 
         // Relative time updates (no full re-render to avoid table flicker)
         setInterval(() => this.updateRelativeTimes(), 60000);
+
+        const repositionMenus = () => this.repositionOpenItemMenus();
+        window.addEventListener('resize', repositionMenus);
+        document.addEventListener('scroll', repositionMenus, { passive: true, capture: true });
 
         // Menu Toggle Handler
         const trigger = document.getElementById('menuTrigger');
@@ -993,8 +998,8 @@ class App {
 
     selectAddItemList(listId) {
         const selected = this.lists.some(l => l.id === listId) ? listId : 'default';
-        this.newItemListId = selected;
-        localStorage.setItem('pt_new_item_list', this.newItemListId);
+        this.pendingAddItemListId = selected;
+        this.renderAddItemListSelect();
         this.logAction('list.add_item_target_changed', { listId: selected });
         this.closeAddItemListMenu();
     }
@@ -1130,6 +1135,7 @@ class App {
             const incoming = Array.isArray(data.lists) && data.lists.length ? data.lists : [{ id: 'default', name: 'Default' }];
             this.lists = incoming;
             if (!this.lists.some(l => l.id === this.newItemListId)) this.newItemListId = 'default';
+            if (this.pendingAddItemListId && !this.lists.some(l => l.id === this.pendingAddItemListId)) this.pendingAddItemListId = null;
             if (this.activeListId !== 'all' && !this.lists.some(l => l.id === this.activeListId)) this.activeListId = 'all';
         } catch (e) {
             console.warn('Could not load lists', e);
@@ -1689,12 +1695,14 @@ class App {
                 currencyName,
                 listName
             ].join(' ').toLowerCase();
-            items.push({
-                label: `Refresh: ${item.name}`,
-                meta: 'Item',
-                action: () => this.refreshItem(item.id),
-                searchText: searchBlob
-            });
+            if (!item.purchased) {
+                items.push({
+                    label: `Refresh: ${item.name}`,
+                    meta: 'Item',
+                    action: () => this.refreshItem(item.id),
+                    searchText: searchBlob
+                });
+            }
             items.push({
                 label: `Open History: ${item.name}`,
                 meta: 'Item',
@@ -1788,12 +1796,17 @@ class App {
         const label = document.getElementById('addItemListTriggerLabel');
         if (!menu) return;
         const fallbackId = (this.lists[0] && this.lists[0].id) || 'default';
-        const selected = this.lists.some(l => l.id === this.newItemListId) ? this.newItemListId : fallbackId;
-        this.newItemListId = selected;
+        const defaultListId = this.lists.some(l => l.id === this.newItemListId) ? this.newItemListId : fallbackId;
+        const pendingListId = this.lists.some(l => l.id === this.pendingAddItemListId) ? this.pendingAddItemListId : null;
+        this.newItemListId = defaultListId;
+        this.pendingAddItemListId = pendingListId;
         localStorage.setItem('pt_new_item_list', this.newItemListId);
-        if (label) label.textContent = 'Add to';
+        if (label) {
+            const pendingList = pendingListId ? this.lists.find(l => l.id === pendingListId) : null;
+            label.textContent = pendingList ? pendingList.name : 'Add to';
+        }
         menu.innerHTML = this.lists.map(l => `
-            <button type="button" class="custom-select-option" onclick="app.selectAddItemList('${l.id}')">${this.escapeHtml(l.name)}</button>
+            <button type="button" class="custom-select-option ${pendingListId === l.id ? 'is-selected' : ''}" onclick="app.selectAddItemList('${l.id}')">${this.escapeHtml(l.name)}</button>
         `).join('');
     }
 
@@ -1806,7 +1819,7 @@ class App {
 
         const url = urlInp.value.trim();
         const name = nameInp.value.trim();
-        const selectedListId = this.newItemListId || 'default';
+        const selectedListId = this.pendingAddItemListId || this.newItemListId || 'default';
         const targetPrice = parseFloat(targetInp?.value) || null;
         const canonicalUrl = this.normalizeTrackedUrl(url);
 
@@ -1872,6 +1885,8 @@ class App {
             urlInp.value = '';
             nameInp.value = '';
             if (targetInp) targetInp.value = '';
+            this.pendingAddItemListId = null;
+            this.renderAddItemListSelect();
 
         } catch (e) {
             this.showToast(e.message, "error");
@@ -1934,6 +1949,10 @@ class App {
     async refreshItem(id) {
         const item = this.items.find(i => i.id === id);
         if (!item) return;
+        if (item.purchased) {
+            this.showToast('Purchased items are excluded from refresh checks', 'error');
+            return;
+        }
         this.beginItemCheck(id);
 
         try {
@@ -2517,9 +2536,9 @@ class App {
                     </div>
                 </div>
                 <div class="purchased-actions">
-                    <button class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem;" onclick="app.togglePurchased('${item.id}')">Restore</button>
-                    <a class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem; text-decoration:none; display:inline-flex;" href="${this.escapeHtml(item.url)}" target="_blank" rel="noopener">Open</a>
-                    <button class="icon-btn" style="width:auto; height:auto; padding:0.35rem 0.6rem; border-color: rgba(248,113,113,0.4); color: var(--danger);" onclick="app.deleteItem('${item.id}')">Remove</button>
+                    <button class="icon-btn purchased-action-btn" onclick="app.togglePurchased('${item.id}')">Restore</button>
+                    <a class="icon-btn purchased-action-btn" href="${this.escapeHtml(item.url)}" target="_blank" rel="noopener">Open</a>
+                    <button class="icon-btn purchased-action-btn danger" onclick="app.deleteItem('${item.id}')">Remove</button>
                 </div>
             </div>
         `).join('');
@@ -2618,6 +2637,7 @@ class App {
             const hitClass = isTargetHit ? 'target-hit-glow' : '';
             const checkClass = this.getItemCheckClass(item);
             const badgeHtml = this.getBestValueBadge(item);
+            const badgeBlock = badgeHtml ? `<div class="badge-container">${badgeHtml}</div>` : '';
             const moveToOptions = this.lists
                 .filter(l => l.id !== (item.listId || 'default'))
                 .map(l => `<button class="actions-menu-item" onclick="event.stopPropagation(); app.moveItemToList('${item.id}','${l.id}')">${l.name}</button>`)
@@ -2625,14 +2645,13 @@ class App {
             const purchaseActionLabel = item.purchased ? 'Mark as Not Purchased' : 'Mark as Purchased';
             const lastCheckMeta = this.getLastCheckMeta(item);
             const priceCellHtml = stockMeta.isOut
-                ? `<div class="stock-warning" title="${this.escapeHtml(stockMeta.title)}">Out of Stock</div>${item.currentPrice ? `<div class="stock-last-price">Last seen: ${priceStr}</div>` : ''}`
-                : `<div>${priceStr}</div>${targetHtml}`;
+                ? `${badgeBlock}<div class="stock-warning" title="${this.escapeHtml(stockMeta.title)}">Out of Stock</div>${item.currentPrice ? `<div class="stock-last-price">Last seen: ${priceStr}</div>` : ''}`
+                : `${badgeBlock}<div>${priceStr}</div>${targetHtml}`;
 
             const div = document.createElement('div');
             div.className = `list-item ${hitClass} ${checkClass}`;
             div.setAttribute('data-id', item.id);
             div.innerHTML = `
-                <div class="badge-container">${badgeHtml}</div>
                 <div class="item-main" onclick="app.showHistoryModal('${item.id}')">
                     <div class="item-title" title="${item.name}">${item.name}</div>
                     <a href="${item.url}" target="_blank" class="item-link" onclick="event.stopPropagation()">${new URL(item.url).hostname.replace('www.', '')}</a>
@@ -3296,9 +3315,64 @@ class App {
             menu.classList.toggle('active');
             if (row && willOpen) row.classList.add('menu-open');
             if (willOpen) {
-                requestAnimationFrame(() => this.updateMoveSubmenuDirection(menu));
+                requestAnimationFrame(() => this.positionItemMenu(menu));
             }
         }
+    }
+
+    repositionOpenItemMenus() {
+        document.querySelectorAll('.actions-menu.active').forEach(menu => this.positionItemMenu(menu));
+    }
+
+    positionItemMenu(menu) {
+        if (!menu) return;
+        const anchor = menu.parentElement;
+        if (!anchor) return;
+
+        const viewportPadding = 12;
+        const gap = 5;
+        menu.style.top = '';
+        menu.style.right = '0px';
+        menu.style.maxHeight = '';
+        menu.style.overflowY = '';
+
+        const naturalHeight = Math.max(menu.offsetHeight || menu.scrollHeight || 0, 0);
+        const availableHeight = Math.max(120, window.innerHeight - (viewportPadding * 2));
+        const effectiveHeight = Math.min(naturalHeight, availableHeight);
+        if (naturalHeight > availableHeight) {
+            menu.style.maxHeight = `${Math.floor(availableHeight)}px`;
+            menu.style.overflowY = 'auto';
+        }
+
+        const anchorRect = anchor.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - anchorRect.bottom - viewportPadding;
+        const spaceAbove = anchorRect.top - viewportPadding;
+        const preferredBelowTop = anchorRect.height + gap;
+        const preferredAboveTop = -(effectiveHeight + gap);
+        const minTop = viewportPadding - anchorRect.top;
+        const maxTop = window.innerHeight - viewportPadding - anchorRect.top - effectiveHeight;
+        let top = (effectiveHeight > spaceBelow && spaceAbove > spaceBelow) ? preferredAboveTop : preferredBelowTop;
+        if (minTop <= maxTop) {
+            top = Math.min(Math.max(top, minTop), maxTop);
+        }
+        menu.style.top = `${Math.round(top)}px`;
+
+        let rightOffset = 0;
+        let rect = menu.getBoundingClientRect();
+        if (rect.left < viewportPadding) {
+            rightOffset -= (viewportPadding - rect.left);
+        }
+        if (rect.right > window.innerWidth - viewportPadding) {
+            rightOffset += (rect.right - (window.innerWidth - viewportPadding));
+        }
+        menu.style.right = `${Math.round(rightOffset)}px`;
+
+        rect = menu.getBoundingClientRect();
+        if (rect.left < viewportPadding) {
+            menu.style.right = `${Math.round(rightOffset - (viewportPadding - rect.left))}px`;
+        }
+
+        this.updateMoveSubmenuDirection(menu);
     }
 
     updateMoveSubmenuDirection(menu) {
@@ -3314,6 +3388,10 @@ class App {
         if (!wrap) return;
         const submenu = wrap.querySelector('.actions-submenu');
         if (!submenu) return;
+        const viewportPadding = 12;
+        submenu.style.top = '-1px';
+        submenu.style.maxHeight = '';
+        submenu.style.overflowY = '';
         const rect = wrap.getBoundingClientRect();
         const submenuWidth = Math.max(submenu.offsetWidth || 0, 180);
         const gap = 10;
@@ -3322,6 +3400,23 @@ class App {
         const openRight = rightSpace >= (submenuWidth + gap) || (rightSpace > leftSpace);
         wrap.classList.toggle('submenu-right', openRight);
         wrap.classList.toggle('submenu-left', !openRight);
+
+        const naturalHeight = Math.max(submenu.offsetHeight || submenu.scrollHeight || 0, 0);
+        const availableHeight = Math.max(120, window.innerHeight - (viewportPadding * 2));
+        const effectiveHeight = Math.min(naturalHeight, availableHeight);
+        if (naturalHeight > availableHeight) {
+            submenu.style.maxHeight = `${Math.floor(availableHeight)}px`;
+            submenu.style.overflowY = 'auto';
+        }
+
+        const preferredTop = -1;
+        const minTop = viewportPadding - rect.top;
+        const maxTop = window.innerHeight - viewportPadding - rect.top - effectiveHeight;
+        let top = preferredTop;
+        if (minTop <= maxTop) {
+            top = Math.min(Math.max(top, minTop), maxTop);
+        }
+        submenu.style.top = `${Math.round(top)}px`;
     }
 
     closeAllMenus() {
