@@ -1,8 +1,11 @@
 node_modules
 server/node_modules
-backups/*.json
+backups/
+data/
 prices.json
 settings.json
+audit.json
+diagnostics.json
 .git
 .gitignore
 .env

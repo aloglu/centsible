@@ -51,9 +51,7 @@ class Sparkline {
 
         const html = `
     <svg width="100%" height="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" 
-         style="overflow: visible;"
-         onmousemove="app.handleSparklineHover(event, '${itemId}', this)"
-         onmouseleave="app.handleSparklineLeave(this)">
+         style="overflow: visible;">
         <polyline fill="none" stroke="${color}" stroke-width="2" points="${points}" vector-effect="non-scaling-stroke"/>
         ${dataPointsHtml}
         <circle class="hover-dot" r="4" fill="${color}" stroke="#fff" stroke-width="2" style="display:none; pointer-events: none;" />
@@ -71,11 +69,6 @@ class Sparkline {
  */
 class Scraper {
     static PROXIES = [
-        {
-            // Local Node.js Server (Fastest, Recommended)
-            url: 'http://localhost:3000/api/fetch?url=',
-            type: 'text'
-        },
         {
             // JSON response { contents: string }
             url: 'https://api.allorigins.win/get?url=',
@@ -96,7 +89,7 @@ class Scraper {
     static async fetchPrice(targetUrl, customSelector = null) {
         // Prefer backend extraction for consistency with background checks.
         try {
-            const res = await fetch('http://localhost:3000/api/extract', {
+            const res = await fetch(`${window.location.origin}/api/extract`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url: targetUrl, selector: customSelector || null })
@@ -112,8 +105,15 @@ class Scraper {
         }
 
         const encoded = encodeURIComponent(targetUrl);
+        const proxies = [
+            {
+                url: `${window.location.origin}/api/fetch?url=`,
+                type: 'text'
+            },
+            ...Scraper.PROXIES
+        ];
 
-        for (const proxy of Scraper.PROXIES) {
+        for (const proxy of proxies) {
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout per proxy
@@ -291,6 +291,7 @@ class App {
     constructor() {
         // Primary client-side state. Replaced/updated from backend on polling and user actions.
         this.items = [];
+        this.itemsRevision = 0;
         this.selectorHistory = [];
         this.sortMethod = 'name_asc';
         this.SERVER_URL = window.location.origin + '/api';
@@ -302,6 +303,8 @@ class App {
         this.commandResults = [];
         this.commandSelectionIndex = 0;
         this.auditEntries = [];
+        this.lastAuditFailureToastAt = 0;
+        this.toastTimer = null;
         this.refreshPollTimer = null;
         this.itemCheckFlashUntil = new Map();
         this.localCheckingItemIds = new Set();
@@ -343,10 +346,18 @@ class App {
             discordWebhook: '',
             telegramWebhook: '',
             telegramChatId: '',
+            discordWebhookConfigured: false,
+            telegramWebhookConfigured: false,
+            telegramChatIdConfigured: false,
+            backupPasswordConfigured: false,
+            backupPasswordUpdatedAt: null,
+            backupSessionUnlocked: false,
             // Fallback defaults before `/api/settings` is loaded.
             checkIntervalMs: 60 * 60 * 1000,
             checkIntervalPreset: '1h'
         };
+        this.settingsRevision = 0;
+        this.listsStateToken = '';
 
         this.init();
     }
@@ -357,17 +368,20 @@ class App {
         this.applySystemActivitySectionStates();
         await Promise.all([
             this.loadSettings(),
-            this.loadFromServer(),
-            this.fetchRates(),
             this.loadLists(),
             this.loadAlertRules(),
             this.loadAuditLog()
+        ]);
+        await Promise.all([
+            this.loadFromServer(),
+            this.fetchRates()
         ]);
 
         this.switchView(this.activeView || 'portfolio');
         this.render();
         this.renderListControls();
         this.fillAlertRulesForm();
+        this.fillSettingsForm();
         this.syncCheckIntervalUI();
 
         // Poll server status every 10 seconds
@@ -387,12 +401,21 @@ class App {
         document.addEventListener('scroll', repositionMenus, { passive: true, capture: true });
 
         // Menu Toggle Handler
-        const trigger = document.getElementById('menuTrigger');
-        if (trigger) {
-            trigger.addEventListener('click', (e) => {
+        const menuTrigger = document.getElementById('menuTrigger');
+        if (menuTrigger) {
+            menuTrigger.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.closeAllMenus();
                 document.getElementById('mainHeader').classList.toggle('menu-open');
+            });
+        }
+
+        const portfolioHomeBtn = document.getElementById('portfolioHomeBtn');
+        if (portfolioHomeBtn) {
+            portfolioHomeBtn.addEventListener('click', () => {
+                const header = document.getElementById('mainHeader');
+                if (header) header.classList.remove('menu-open');
+                this.switchView('portfolio');
             });
         }
 
@@ -402,6 +425,7 @@ class App {
             if (header && header.classList.contains('menu-open')) {
                 const trigger = document.getElementById('menuTrigger');
                 const menu = document.getElementById('headerMenu');
+                if (!menu || !trigger) return;
                 if (!menu.contains(e.target) && !trigger.contains(e.target)) {
                     header.classList.remove('menu-open');
                 }
@@ -585,13 +609,23 @@ class App {
 
     async logAction(action, details = {}) {
         try {
-            await fetch(`${this.SERVER_URL}/audit`, {
+            const res = await fetch(`${this.SERVER_URL}/audit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action, details, source: 'ui' })
             });
+            if (!res.ok) throw new Error('Failed to write audit log');
             if (this.activeView === 'audit') await this.loadAuditLog({ silent: true });
-        } catch (_) { }
+            return true;
+        } catch (e) {
+            console.warn(`Audit log write failed for ${action}:`, e);
+            const now = Date.now();
+            if ((now - this.lastAuditFailureToastAt) > 60000) {
+                this.lastAuditFailureToastAt = now;
+                this.showToast('Action completed, but audit log write failed.', 'error');
+            }
+            return false;
+        }
     }
 
     async loadAuditLog(options = {}) {
@@ -637,13 +671,17 @@ class App {
             this.auditEntries = [];
             this.renderAuditPanel();
             this.showToast('Audit log cleared', 'success');
-            this.logAction('audit.cleared');
         } catch (e) {
             this.showToast(e.message || 'Failed to clear audit log', 'error');
         }
     }
 
     // --- Server Communications ---
+
+    cloneData(value) {
+        if (value == null) return value;
+        return JSON.parse(JSON.stringify(value));
+    }
 
     getItemsSignature(items) {
         // Compact fingerprint used to decide whether UI rows need a full re-render.
@@ -652,7 +690,11 @@ class App {
             const lastHist = item.history && item.history.length ? item.history[item.history.length - 1] : null;
             return [
                 item.id || '',
+                item.name || '',
+                item.url || '',
                 item.currentPrice || '',
+                item.targetPrice || '',
+                item.currency || '',
                 item.lastChecked || '',
                 item.lastCheckAttempt || '',
                 item.lastCheckStatus || '',
@@ -670,6 +712,146 @@ class App {
         }).join('~');
     }
 
+    getListsSignature(lists = this.lists) {
+        if (!Array.isArray(lists)) return '';
+        return lists.map(list => [
+            list.id || '',
+            list.name || '',
+            Number(list.itemCount || 0)
+        ].join('|')).join('~');
+    }
+
+    rebuildSelectorHistory() {
+        this.selectorHistory = [];
+        this.items.forEach(item => {
+            if (item.selector && !this.selectorHistory.includes(item.selector)) {
+                this.selectorHistory.push(item.selector);
+            }
+        });
+    }
+
+    applyNormalizedItems(normalizedItems) {
+        this.items = Array.isArray(normalizedItems) ? normalizedItems : [];
+        this.rebuildSelectorHistory();
+        return this.items;
+    }
+
+    normalizeServerItems(items, fallbackListId = null) {
+        const sourceItems = Array.isArray(items) ? items : [];
+        const resolvedFallbackListId = fallbackListId || (this.lists[0] && this.lists[0].id) || 'default';
+        return sourceItems
+            .map(item => ({
+                ...item,
+                listId: item.listId || resolvedFallbackListId,
+                canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
+                selector: typeof item.selector === 'string' && item.selector.trim() ? item.selector.trim() : null,
+                currency: typeof item.currency === 'string' && item.currency.trim() ? item.currency.trim().toUpperCase() : null,
+                currentPrice: this.normalizeNullableNumber(item.currentPrice),
+                originalPrice: this.normalizeNullableNumber(item.originalPrice),
+                targetPrice: this.normalizeNullableNumber(item.targetPrice),
+                lastSeenPrice: this.normalizeNullableNumber(item.lastSeenPrice),
+                extractionConfidence: this.normalizeConfidence(item.extractionConfidence),
+                history: this.normalizeHistoryEntries(item.history),
+                purchased: Boolean(item.purchased),
+                purchasedAt: item.purchasedAt || null,
+                stockStatus: item.stockStatus || 'unknown',
+                stockReason: item.stockReason || '',
+                stockConfidence: this.normalizeConfidence(item.stockConfidence),
+                stockSource: item.stockSource || null
+            }))
+            .filter(item => !this.isLegacyDemoItem(item));
+    }
+
+    normalizeNullableNumber(value) {
+        if (value == null || value === '') return null;
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    normalizeConfidence(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return Math.max(0, Math.min(100, Math.round(numeric)));
+    }
+
+    normalizeHistoryEntries(history) {
+        if (!Array.isArray(history)) return [];
+        return history
+            .filter(entry => entry && typeof entry === 'object')
+            .map((entry) => {
+                const price = this.normalizeNullableNumber(entry.price);
+                const date = entry.date ? new Date(entry.date) : null;
+                if (!Number.isFinite(price) || !date || Number.isNaN(date.getTime())) return null;
+                return {
+                    price,
+                    date: date.toISOString()
+                };
+            })
+            .filter(Boolean);
+    }
+
+    applyServerItemsPayload(data, fallbackItems = null) {
+        const incomingItems = Array.isArray(data?.items)
+            ? data.items
+            : (Array.isArray(fallbackItems) ? fallbackItems : []);
+        const normalizedItems = this.normalizeServerItems(incomingItems);
+        const revision = Number(data?.revision);
+        if (Number.isFinite(revision)) {
+            this.itemsRevision = revision;
+        }
+        return this.applyNormalizedItems(normalizedItems);
+    }
+
+    async syncListsFromItemsPayload(data) {
+        const nextListsStateToken = typeof data?.listsStateToken === 'string'
+            ? data.listsStateToken
+            : '';
+        const nextSettingsRevision = Number(data?.settingsRevision);
+        const hasListsTokenChange = nextListsStateToken && nextListsStateToken !== this.listsStateToken;
+        const hasSettingsRevisionChange = Number.isFinite(nextSettingsRevision) && nextSettingsRevision !== this.settingsRevision;
+        if (!hasListsTokenChange && !hasSettingsRevisionChange) {
+            return false;
+        }
+
+        const previousListSignature = this.getListsSignature();
+        const previousActiveListId = this.activeListId;
+        const previousDefaultListId = this.newItemListId;
+        await this.loadLists().catch(() => { });
+        const nextListSignature = this.getListsSignature();
+        const changed = previousListSignature !== nextListSignature
+            || previousActiveListId !== this.activeListId
+            || previousDefaultListId !== this.newItemListId;
+
+        if (changed) {
+            this.renderListControls();
+            this.renderListsManager();
+        }
+
+        return changed;
+    }
+
+    async sendItemMutation(url, options = {}, fallbackMessage = 'Failed to save changes') {
+        try {
+            const res = await fetch(url, options);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                if (res.status === 409 && Array.isArray(data.items)) {
+                    this.applyServerItemsPayload(data, data.items);
+                    await this.syncListsFromItemsPayload(data);
+                    this.render();
+                }
+                throw new Error(data.error || fallbackMessage);
+            }
+            if (Array.isArray(data.items)) {
+                this.applyServerItemsPayload(data, data.items);
+            }
+            return data;
+        } catch (e) {
+            console.error('Item mutation failed:', e);
+            throw e;
+        }
+    }
+
     async loadFromServer(options = {}) {
         const silent = Boolean(options.silent);
         try {
@@ -678,37 +860,18 @@ class App {
             const data = await res.json();
 
             const currentSignature = this.getItemsSignature(this.items);
-            let incomingItems = data.items || [];
-            const fallbackListId = (this.lists[0] && this.lists[0].id) || 'default';
-            incomingItems = incomingItems.map(item => ({
-                ...item,
-                listId: item.listId || fallbackListId,
-                canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
-                purchased: Boolean(item.purchased),
-                purchasedAt: item.purchasedAt || null,
-                stockStatus: item.stockStatus || 'unknown',
-                stockReason: item.stockReason || '',
-                stockConfidence: Number(item.stockConfidence || 0),
-                stockSource: item.stockSource || null
-            }));
-            const filteredItems = incomingItems.filter(item => !this.isLegacyDemoItem(item));
-            if (filteredItems.length !== incomingItems.length) {
-                incomingItems = filteredItems;
-                this.items = filteredItems;
-                await this.saveToServer();
+            const serverItems = Array.isArray(data.items) ? data.items : [];
+            const serverRevision = Number(data.revision);
+            if (Number.isFinite(serverRevision)) {
+                this.itemsRevision = serverRevision;
             }
+            const incomingItems = this.normalizeServerItems(serverItems);
             const nextSignature = this.getItemsSignature(incomingItems);
-            const changed = currentSignature !== nextSignature;
+            const listMetadataChanged = await this.syncListsFromItemsPayload(data);
+            const changed = currentSignature !== nextSignature || listMetadataChanged;
 
             // Backend remains source-of-truth; UI state is a projection of this array.
-            this.items = incomingItems;
-
-            this.selectorHistory = [];
-            this.items.forEach(item => {
-                if (item.selector && !this.selectorHistory.includes(item.selector)) {
-                    this.selectorHistory.push(item.selector);
-                }
-            });
+            this.applyNormalizedItems(incomingItems);
 
             this.updateStatusUI(data.status);
             return changed;
@@ -738,19 +901,6 @@ class App {
         );
     }
 
-    async saveToServer() {
-        try {
-            await fetch(`${this.SERVER_URL}/items`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(this.items)
-            });
-        } catch (e) {
-            console.error('Failed to save:', e);
-            this.showToast('Failed to save changes to server', 'error');
-        }
-    }
-
     async updateServerStatus() {
         try {
             const res = await fetch(`${this.SERVER_URL}/items`);
@@ -770,19 +920,11 @@ class App {
                 const res = await fetch(`${this.SERVER_URL}/items`);
                 if (!res.ok) return;
                 const data = await res.json();
-                const incomingItems = Array.isArray(data.items) ? data.items : [];
+                const previousSignature = this.getItemsSignature(this.items);
                 const previousById = new Map(this.items.map(item => [item.id, item]));
-                this.items = incomingItems.map(item => ({
-                    ...item,
-                    listId: item.listId || 'default',
-                    canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
-                    purchased: Boolean(item.purchased),
-                    purchasedAt: item.purchasedAt || null,
-                    stockStatus: item.stockStatus || 'unknown',
-                    stockReason: item.stockReason || '',
-                    stockConfidence: Number(item.stockConfidence || 0),
-                    stockSource: item.stockSource || null
-                }));
+                const incomingItems = this.applyServerItemsPayload(data, data.items);
+                const nextSignature = this.getItemsSignature(incomingItems);
+                const listMetadataChanged = await this.syncListsFromItemsPayload(data);
                 this.items.forEach(item => {
                     const previous = previousById.get(item.id);
                     const hadNewAttempt = item.lastCheckAttempt && previous && previous.lastCheckAttempt !== item.lastCheckAttempt;
@@ -790,7 +932,9 @@ class App {
                         this.markItemCheckFlash(item.id, 10000);
                     }
                 });
-                this.render();
+                if (previousSignature !== nextSignature || listMetadataChanged) {
+                    this.render();
+                }
                 this.updateStatusUI(data.status);
                 if (!data.status || !data.status.isChecking) {
                     clearInterval(this.refreshPollTimer);
@@ -808,7 +952,11 @@ class App {
         try {
             const res = await fetch(`${this.SERVER_URL}/settings`);
             if (res.ok) {
-                this.settings = { ...this.settings, ...(await res.json()) };
+                const data = await res.json();
+                const revision = Number(data.revision);
+                if (Number.isFinite(revision)) this.settingsRevision = revision;
+                this.settings = { ...this.settings, ...data };
+                this.fillSettingsForm();
                 this.syncCheckIntervalUI();
             }
         } catch (e) {
@@ -857,6 +1005,21 @@ class App {
         if (trigger) {
             trigger.title = `Background checks every ${this.formatCheckInterval(ms)}`;
         }
+        const summary = document.getElementById('settingsIntervalSummary');
+        if (summary) {
+            summary.textContent = `Background checks currently run every ${this.formatCheckInterval(ms)}.`;
+        }
+        const status = document.getElementById('settingsIntervalStatus');
+        if (status) {
+            status.textContent = `Every ${this.formatCheckInterval(ms)}`;
+        }
+        const activePreset = this.getPresetForInterval(ms);
+        document.querySelectorAll('.interval-option-btn[data-interval-option]').forEach((button) => {
+            const value = button.getAttribute('data-interval-option');
+            const isActive = value === activePreset || (value === 'custom' && activePreset === 'custom');
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
     }
 
     getCustomIntervalModalValue(ms) {
@@ -891,6 +1054,7 @@ class App {
         }
 
         const payload = {
+            revision: this.settingsRevision,
             checkIntervalMs: Math.round(ms),
             checkIntervalPreset: preset
         };
@@ -901,9 +1065,15 @@ class App {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            if (!res.ok) throw new Error('Request failed');
+            const data = await res.json().catch(() => ({}));
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { fallbackMessage: 'Settings changed in another tab. Reloaded the latest interval.' });
+            }
+            if (!res.ok) throw new Error(data.error || 'Request failed');
 
-            this.settings = { ...this.settings, ...payload };
+            this.settings = { ...this.settings, ...payload, ...data };
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.syncCheckIntervalUI();
             this.showToast(`Check interval set to ${this.formatCheckInterval(payload.checkIntervalMs)}`, 'success');
             this.logAction('settings.check_interval_changed', {
@@ -1036,17 +1206,122 @@ class App {
         this.closeCustomIntervalUnitMenu();
     }
 
-    async saveSettings() {
-        const discord = document.getElementById('discordWebhookInput').value.trim();
-        const tgBot = document.getElementById('telegramWebhookInput').value.trim();
-        const tgChat = document.getElementById('telegramChatIdInput').value.trim();
+    fillSettingsForm() {
+        const discord = document.getElementById('discordWebhookInput');
+        const tgBot = document.getElementById('telegramWebhookInput');
+        const tgChat = document.getElementById('telegramChatIdInput');
+        const backupPassword = document.getElementById('backupPasswordInput');
+        const backupPasswordConfirm = document.getElementById('backupPasswordConfirmInput');
 
-        const payload = {
-            discordWebhook: discord,
-            telegramWebhook: tgBot,
-            telegramChatId: tgChat
-        };
-        this.settings = { ...this.settings, ...payload };
+        this.resetProtectedInput(discord, this.settings.discordWebhookConfigured, 'Configured - leave blank to keep current');
+        this.resetProtectedInput(tgBot, this.settings.telegramWebhookConfigured, 'Configured - leave blank to keep current');
+        this.resetProtectedInput(tgChat, this.settings.telegramChatIdConfigured, 'Configured - leave blank to keep current');
+        if (backupPassword) backupPassword.value = '';
+        if (backupPasswordConfirm) backupPasswordConfirm.value = '';
+
+        this.updateBackupPasswordStatus();
+    }
+
+    resetProtectedInput(input, configured, configuredPlaceholder) {
+        if (!input) return;
+        if (!input.dataset.defaultPlaceholder) {
+            input.dataset.defaultPlaceholder = input.placeholder || '';
+        }
+        input.value = '';
+        input.dataset.touched = 'false';
+        input.dataset.configured = configured ? 'true' : 'false';
+        input.placeholder = configured ? configuredPlaceholder : input.dataset.defaultPlaceholder;
+    }
+
+    updateBackupPasswordStatus() {
+        const configured = Boolean(this.settings?.backupPasswordConfigured);
+        const unlocked = Boolean(this.settings?.backupSessionUnlocked);
+        const updatedAt = this.settings?.backupPasswordUpdatedAt
+            ? new Date(this.settings.backupPasswordUpdatedAt).toLocaleString()
+            : null;
+        let label = 'Not configured';
+        if (configured) {
+            label = unlocked
+                ? `Configured${updatedAt ? ` • Updated ${updatedAt}` : ''}`
+                : 'Unlock required';
+        }
+
+        ['backupPasswordStatus', 'backupsEncryptionStatus'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = label;
+            el.classList.toggle('configured', configured);
+            el.classList.toggle('missing', !configured);
+        });
+    }
+
+    applyProtectedSettingPayload(payload, input, valueKey, configuredKey, clearKey) {
+        if (!input) return;
+        const value = input.value.trim();
+        const configured = Boolean(this.settings?.[configuredKey]);
+        const touched = input.dataset.touched === 'true';
+        if (value) {
+            payload[valueKey] = value;
+        } else if (configured && touched) {
+            payload[clearKey] = true;
+        }
+    }
+
+    async refreshConfigState(options = {}) {
+        const includeItems = Boolean(options.includeItems);
+        const includeBackups = Boolean(options.includeBackups);
+        const tasks = [
+            this.loadSettings(),
+            this.loadLists(),
+            this.loadAlertRules()
+        ];
+        if (includeItems) {
+            tasks.push(this.loadFromServer({ silent: true }));
+        }
+        await Promise.all(tasks);
+        this.renderListControls();
+        this.fillAlertRulesForm();
+        this.fillSettingsForm();
+        this.syncCheckIntervalUI();
+        this.render();
+        this.renderListsManager();
+        if (includeBackups) {
+            await this.renderBackupsList();
+        }
+    }
+
+    async handleConfigConflict(data, options = {}) {
+        await this.refreshConfigState({
+            includeItems: Boolean(options.includeItems),
+            includeBackups: Boolean(options.includeBackups)
+        });
+        throw new Error(data?.error || options.fallbackMessage || 'Settings changed in another tab. Reload and try again.');
+    }
+
+    async saveSettings() {
+        const discordInput = document.getElementById('discordWebhookInput');
+        const tgBotInput = document.getElementById('telegramWebhookInput');
+        const tgChatInput = document.getElementById('telegramChatIdInput');
+        const discord = discordInput?.value.trim() || '';
+        const tgBot = tgBotInput?.value.trim() || '';
+        const tgChat = tgChatInput?.value.trim() || '';
+        const backupPassword = document.getElementById('backupPasswordInput')?.value || '';
+        const backupPasswordConfirm = document.getElementById('backupPasswordConfirmInput')?.value || '';
+
+        if (backupPassword && backupPassword.length < 8) {
+            this.showToast('Backup password must be at least 8 characters', 'error');
+            return;
+        }
+        if (backupPassword && backupPassword !== backupPasswordConfirm) {
+            this.showToast('Backup password confirmation does not match', 'error');
+            return;
+        }
+
+        const payload = { revision: this.settingsRevision };
+        this.applyProtectedSettingPayload(payload, discordInput, 'discordWebhook', 'discordWebhookConfigured', 'clearDiscordWebhook');
+        this.applyProtectedSettingPayload(payload, tgBotInput, 'telegramWebhook', 'telegramWebhookConfigured', 'clearTelegramWebhook');
+        this.applyProtectedSettingPayload(payload, tgChatInput, 'telegramChatId', 'telegramChatIdConfigured', 'clearTelegramChatId');
+        if (backupPassword) payload.backupPassword = backupPassword;
 
         try {
             const res = await fetch(`${this.SERVER_URL}/settings`, {
@@ -1054,46 +1329,64 @@ class App {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            if (res.ok) {
-                this.showToast('Settings saved!', 'success');
-                this.logAction('settings.saved', {
-                    hasDiscordWebhook: Boolean(discord),
-                    hasTelegramBot: Boolean(tgBot),
-                    hasTelegramChatId: Boolean(tgChat)
-                });
-                this.closeSettingsModal();
+
+            const data = await res.json().catch(() => ({}));
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { includeBackups: true, fallbackMessage: 'Settings changed in another tab. Reloaded the latest values.' });
             }
+            if (!res.ok) throw new Error(data.error || 'Failed to save settings');
+
+            this.settings = {
+                ...this.settings,
+                ...data,
+                discordWebhook: '',
+                telegramWebhook: '',
+                telegramChatId: ''
+            };
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
+
+            await this.loadSettings();
+            this.syncCheckIntervalUI();
+            this.showToast('Settings saved', 'success');
+            this.logAction('settings.saved', {
+                hasDiscordWebhook: Boolean(discord || this.settings.discordWebhookConfigured),
+                hasTelegramBot: Boolean(tgBot || this.settings.telegramWebhookConfigured),
+                hasTelegramChatId: Boolean(tgChat || this.settings.telegramChatIdConfigured),
+                backupPasswordUpdated: Boolean(data.backupPasswordUpdated || backupPassword)
+            });
         } catch (e) {
-            this.showToast('Failed to save settings', 'error');
+            this.showToast(e.message || 'Failed to save settings', 'error');
         }
+    }
+
+    openSettingsSection(sectionId = null, focusId = null) {
+        const header = document.getElementById('mainHeader');
+        if (header) header.classList.remove('menu-open');
+        this.switchView('alerts');
+        requestAnimationFrame(() => {
+            if (sectionId) {
+                document.getElementById(sectionId)?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'start'
+                });
+            }
+            if (focusId) {
+                document.getElementById(focusId)?.focus();
+            }
+        });
     }
 
     showSettingsModal() {
-        // Close dropdown menu if open
-        const header = document.getElementById('mainHeader');
-        if (header) header.classList.remove('menu-open');
-
-        const discord = document.getElementById('discordWebhookInput');
-        const tgBot = document.getElementById('telegramWebhookInput');
-        const tgChat = document.getElementById('telegramChatIdInput');
-        const modal = document.getElementById('settingsModal');
-
-        if (discord) discord.value = this.settings.discordWebhook || '';
-        if (tgBot) tgBot.value = this.settings.telegramWebhook || '';
-        if (tgChat) tgChat.value = this.settings.telegramChatId || '';
-
-        if (modal) {
-            modal.classList.add('active');
-            modal.style.pointerEvents = 'auto';
-        }
+        this.openSettingsSection('settingsListsCard');
     }
 
     closeSettingsModal() {
-        const modal = document.getElementById('settingsModal');
-        if (modal) {
-            modal.classList.remove('active');
-            modal.style.pointerEvents = 'none';
-        }
+        return;
+    }
+
+    showIntervalSettings() {
+        this.openSettingsSection('settingsIntervalCard');
     }
 
     async testNotification(type) {
@@ -1113,8 +1406,9 @@ class App {
                     }
                 })
             });
-            if (!res.ok) throw new Error('Test request failed');
-            this.showToast(`Test ${type} alert sent!`, 'success');
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Test request failed');
+            this.showToast(data.message || `Test ${type} alert sent!`, 'success');
             this.logAction('settings.test_notification', {
                 type,
                 hasDiscordWebhook: Boolean(discord),
@@ -1123,7 +1417,7 @@ class App {
             });
         } catch (e) {
             console.error('Failed to send test notification:', e);
-            this.showToast('Failed to send test alert', 'error');
+            this.showToast(e.message || 'Failed to send test alert', 'error');
         }
     }
 
@@ -1132,6 +1426,9 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/lists`);
             if (!res.ok) return;
             const data = await res.json();
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
+            if (typeof data.listsStateToken === 'string') this.listsStateToken = data.listsStateToken;
             const incoming = Array.isArray(data.lists) && data.lists.length ? data.lists : [{ id: 'default', name: 'Default' }];
             this.lists = incoming;
             if (!this.lists.some(l => l.id === this.newItemListId)) this.newItemListId = 'default';
@@ -1147,10 +1444,17 @@ class App {
         const optionLabel = (l) => `${l.name}${Number(l.itemCount || 0) ? ` (${l.itemCount})` : ''}`;
         this.renderAddItemListSelect();
         if (activeFilter) {
-            activeFilter.innerHTML = [
-                `<option value="all">All Lists</option>`,
-                ...this.lists.map(l => `<option value="${l.id}">${optionLabel(l)}</option>`)
-            ].join('');
+            activeFilter.innerHTML = '';
+            const allOption = document.createElement('option');
+            allOption.value = 'all';
+            allOption.textContent = 'All Lists';
+            activeFilter.appendChild(allOption);
+            this.lists.forEach((l) => {
+                const option = document.createElement('option');
+                option.value = l.id;
+                option.textContent = optionLabel(l);
+                activeFilter.appendChild(option);
+            });
             activeFilter.value = this.activeListId;
             activeFilter.onchange = () => {
                 this.activeListId = activeFilter.value;
@@ -1167,10 +1471,15 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/lists`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name.trim() })
+                body: JSON.stringify({ name: name.trim(), revision: this.settingsRevision })
             });
             const data = await res.json();
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { includeItems: true, fallbackMessage: 'Lists changed in another tab. Reloaded the latest lists.' });
+            }
             if (!res.ok) throw new Error(data.error || 'Failed to create list');
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.lists = data.lists || this.lists;
             this.renderListControls();
             this.showToast('List created', 'success');
@@ -1181,29 +1490,13 @@ class App {
     }
 
     showListsModal() {
-        try {
-            this.closeAllMenus();
-            const header = document.getElementById('mainHeader');
-            if (header) header.classList.remove('menu-open');
-            const modal = document.getElementById('listsModal');
-            if (!modal) {
-                this.showToast('Lists modal not found in page', 'error');
-                return;
-            }
-            modal.classList.add('active');
-            modal.style.pointerEvents = 'auto';
-            this.renderListsManager();
-        } catch (e) {
-            console.error('showListsModal failed:', e);
-            this.showToast('Could not open Lists Manager', 'error');
-        }
+        this.closeAllMenus();
+        this.renderListsManager();
+        this.openSettingsSection('settingsListsCard', 'newListNameInput');
     }
 
     closeListsModal() {
-        const modal = document.getElementById('listsModal');
-        if (!modal) return;
-        modal.classList.remove('active');
-        modal.style.pointerEvents = 'none';
+        return;
     }
 
     async createListFromModal() {
@@ -1214,10 +1507,15 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/lists`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name })
+                body: JSON.stringify({ name, revision: this.settingsRevision })
             });
             const data = await res.json();
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { includeItems: true, fallbackMessage: 'Lists changed in another tab. Reloaded the latest lists.' });
+            }
             if (!res.ok) throw new Error(data.error || 'Failed to create list');
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.lists = data.lists || this.lists;
             if (input) input.value = '';
             this.renderListControls();
@@ -1239,10 +1537,15 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/lists/${encodeURIComponent(listId)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name.trim() })
+                body: JSON.stringify({ name: name.trim(), revision: this.settingsRevision })
             });
             const data = await res.json();
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { includeItems: true, fallbackMessage: 'Lists changed in another tab. Reloaded the latest lists.' });
+            }
             if (!res.ok) throw new Error(data.error || 'Rename failed');
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.lists = data.lists || this.lists;
             this.renderListControls();
             this.renderListsManager();
@@ -1269,15 +1572,28 @@ class App {
 
         try {
             const res = await fetch(`${this.SERVER_URL}/lists/${encodeURIComponent(listId)}/delete`, {
-                method: 'POST'
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ revision: this.settingsRevision })
             });
             const data = await res.json();
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { includeItems: true, fallbackMessage: 'Lists changed in another tab. Reloaded the latest lists.' });
+            }
             if (!res.ok) throw new Error(data.error || 'Delete failed');
+            const settingsRevision = Number(data.settingsRevision ?? data.revision);
+            if (Number.isFinite(settingsRevision)) this.settingsRevision = settingsRevision;
             this.lists = data.lists || this.lists;
-            this.items = this.items.map(item => ({
-                ...item,
-                listId: (item.listId || 'default') === listId ? 'default' : (item.listId || 'default')
-            }));
+            if (Array.isArray(data.items)) {
+                this.applyServerItemsPayload(data, data.items);
+            } else {
+                this.items = this.items.map(item => ({
+                    ...item,
+                    listId: (item.listId || 'default') === listId ? 'default' : (item.listId || 'default')
+                }));
+                const revision = Number(data.revision);
+                if (Number.isFinite(revision)) this.itemsRevision = revision;
+            }
             if (this.activeListId === listId) this.activeListId = 'all';
             localStorage.setItem('pt_active_list', this.activeListId);
             this.renderListControls();
@@ -1294,6 +1610,7 @@ class App {
         this.activeListId = listId;
         localStorage.setItem('pt_active_list', this.activeListId);
         this.renderListControls();
+        this.renderListsManager();
         this.render();
         this.logAction('list.filter_changed', { listId });
     }
@@ -1302,6 +1619,7 @@ class App {
         this.newItemListId = listId;
         localStorage.setItem('pt_new_item_list', this.newItemListId);
         this.renderListControls();
+        this.renderListsManager();
         this.showToast('Default new-item list updated', 'success');
         this.logAction('list.default_new_item_changed', { listId });
     }
@@ -1315,34 +1633,34 @@ class App {
             return acc;
         }, {});
 
-        body.innerHTML = this.lists.map(l => `
-            <div class="list-manager-row">
-                <div class="list-manager-main">
-                    <div class="list-manager-name">${l.name}</div>
-                    <div class="list-manager-meta">
-                        ID: ${l.id} | Items: ${listCounts[l.id] || 0}
-                        ${this.activeListId === l.id ? '| Active filter' : ''}
-                        ${this.newItemListId === l.id ? '| Default for new items' : ''}
+        body.innerHTML = this.lists.map((l) => {
+            const safeListId = this.escapeJsString(l.id);
+            const safeListName = this.escapeHtml(l.name);
+            const meta = [
+                `ID: ${l.id}`,
+                `Items: ${listCounts[l.id] || 0}`,
+                this.activeListId === l.id ? 'Active filter' : '',
+                this.newItemListId === l.id ? 'Default for new items' : ''
+            ].filter(Boolean).join(' | ');
+            return `
+                <div class="list-manager-row">
+                    <div class="list-manager-main">
+                        <div class="list-manager-name">${safeListName}</div>
+                        <div class="list-manager-meta">${this.escapeHtml(meta)}</div>
+                    </div>
+                    <div class="list-manager-actions">
+                        <button onclick="app.setActiveFilterList('${safeListId}')">View</button>
+                        <button onclick="app.setDefaultNewItemList('${safeListId}')">Make Default</button>
+                        <button onclick="app.renameList('${safeListId}')">Rename</button>
+                        ${l.id === 'default' ? '' : `<button onclick="app.deleteList('${safeListId}')">Delete</button>`}
                     </div>
                 </div>
-                <div class="list-manager-actions">
-                    <button onclick="app.setActiveFilterList('${l.id}')">View</button>
-                    <button onclick="app.setDefaultNewItemList('${l.id}')">Make Default</button>
-                    <button onclick="app.renameList('${l.id}')">Rename</button>
-                    ${l.id === 'default' ? '' : `<button onclick="app.deleteList('${l.id}')">Delete</button>`}
-                </div>
-            </div>
-        `).join('');
+            `;
+        }).join('');
     }
 
     setupListsManagerBindings() {
-        const openButtons = document.querySelectorAll('[onclick="app.showListsModal()"]');
-        openButtons.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.preventDefault();
-                this.showListsModal();
-            });
-        });
+        return;
     }
 
     async loadAlertRules() {
@@ -1350,6 +1668,8 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/alert-rules`);
             if (!res.ok) return;
             const data = await res.json();
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.alertRules = { ...this.alertRules, ...(data.alertRules || {}) };
         } catch (e) {
             console.warn('Could not load alert rules', e);
@@ -1378,6 +1698,7 @@ class App {
     async saveAlertRules() {
         const get = (id) => document.getElementById(id);
         const payload = {
+            revision: this.settingsRevision,
             targetHitEnabled: Boolean(get('ruleTargetHit')?.checked),
             priceDropEnabled: Boolean(get('rulePriceDrop')?.checked),
             priceDrop24hEnabled: Boolean(get('ruleDrop24h')?.checked),
@@ -1396,7 +1717,12 @@ class App {
                 body: JSON.stringify(payload)
             });
             const data = await res.json();
+            if (res.status === 409) {
+                await this.handleConfigConflict(data, { fallbackMessage: 'Settings changed in another tab. Reloaded the latest alert rules.' });
+            }
             if (!res.ok) throw new Error(data.error || 'Failed to save rules');
+            const revision = Number(data.revision);
+            if (Number.isFinite(revision)) this.settingsRevision = revision;
             this.alertRules = { ...this.alertRules, ...(data.alertRules || payload) };
             this.showToast('Alert rules saved', 'success');
             this.logAction('alert_rules.saved', {
@@ -1416,20 +1742,25 @@ class App {
         try {
             const query = this.activeListId && this.activeListId !== 'all' ? `?limit=60&listId=${encodeURIComponent(this.activeListId)}` : '?limit=60';
             const res = await fetch(`${this.SERVER_URL}/diagnostics${query}`);
-            const data = await res.json();
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Failed to load diagnostics');
             const entries = Array.isArray(data.entries) ? data.entries : [];
             if (!entries.length) {
                 container.innerHTML = '<div class="diag-row">No diagnostics yet.</div>';
                 return;
             }
-            container.innerHTML = entries.slice(0, 40).map(e => `
-                <div class="diag-row ${e.ok ? 'ok' : 'fail'}">
-                    <div>${e.itemName || e.itemId} ${e.ok ? `${e.outOfStock ? '| Out of stock' : `| ${e.price ?? '-'} ${e.currency || ''}`}` : '| Check failed'}</div>
-                    <div class="diag-meta">${new Date(e.time).toLocaleString()} | conf: ${this.formatConfidence(e.confidence)} | src: ${e.source || 'n/a'} | sel: ${e.selectorUsed || 'n/a'}${e.stockReason ? ` | stock: ${e.stockReason}` : ''}${e.error ? ` | err: ${e.error}` : ''}</div>
-                </div>
-            `).join('');
+            container.innerHTML = entries.slice(0, 40).map((e) => {
+                const primaryText = `${e.itemName || e.itemId} ${e.ok ? `${e.outOfStock ? '| Out of stock' : `| ${e.price ?? '-'} ${e.currency || ''}`}` : '| Check failed'}`;
+                const metaText = `${new Date(e.time).toLocaleString()} | conf: ${this.formatConfidence(e.confidence)} | src: ${e.source || 'n/a'} | sel: ${e.selectorUsed || 'n/a'}${e.stockReason ? ` | stock: ${e.stockReason}` : ''}${e.error ? ` | err: ${e.error}` : ''}`;
+                return `
+                    <div class="diag-row ${e.ok ? 'ok' : 'fail'}">
+                        <div>${this.escapeHtml(primaryText)}</div>
+                        <div class="diag-meta">${this.escapeHtml(metaText)}</div>
+                    </div>
+                `;
+            }).join('');
         } catch (e) {
-            container.innerHTML = `<div class="diag-row fail">Failed to load diagnostics: ${e.message}</div>`;
+            container.innerHTML = `<div class="diag-row fail">${this.escapeHtml(`Failed to load diagnostics: ${e.message}`)}</div>`;
         }
     }
 
@@ -1490,10 +1821,11 @@ class App {
         document.querySelectorAll('button[id^="refresh-"] svg.spin').forEach(el => el.classList.remove('spin'));
 
         activeIds.forEach((id) => {
-            const itemEl = document.querySelector(`.list-item[data-id="${id}"]`);
+            const itemEl = document.querySelector(`.list-item[data-dom-id="${this.getDomSafeId(id, 'item-')}"]`);
             if (!itemEl) return;
             itemEl.classList.add('currently-checking');
-            const refreshIcon = document.querySelector(`#refresh-${id} svg`);
+            const refreshButton = document.getElementById(this.getDomSafeId(id, 'refresh-'));
+            const refreshIcon = refreshButton ? refreshButton.querySelector('svg') : null;
             if (refreshIcon) refreshIcon.classList.add('spin');
             if (scrollToRemote && this.remoteCheckingItemId === id) {
                 itemEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1587,6 +1919,17 @@ class App {
                 shouldSelectAllOnFocus = true;
             });
         }
+
+        ['discordWebhookInput', 'telegramWebhookInput', 'telegramChatIdInput'].forEach((id) => {
+            const input = document.getElementById(id);
+            if (!input) return;
+            if (!input.dataset.defaultPlaceholder) {
+                input.dataset.defaultPlaceholder = input.placeholder || '';
+            }
+            input.addEventListener('input', () => {
+                input.dataset.touched = 'true';
+            });
+        });
     }
 
     setupGlobalShortcuts() {
@@ -1651,7 +1994,7 @@ class App {
         const items = [];
         const base = [
             { label: 'Go to Portfolio', meta: 'View', action: () => this.switchView('portfolio') },
-            { label: 'Go to Alerts', meta: 'View', action: () => this.switchView('alerts') },
+            { label: 'Go to Settings', meta: 'View', action: () => this.switchView('alerts') },
             { label: 'Go to System Activity', meta: 'View', action: () => this.switchView('audit') },
             { label: 'Go to Purchased', meta: 'View', action: () => this.switchView('purchased') },
             { label: 'Go to Extractor Lab', meta: 'View', action: () => this.switchView('extractor') },
@@ -1665,8 +2008,10 @@ class App {
                 searchText: 'all list lists items'
             },
             { label: 'Open Lists Manager', meta: 'View', action: () => this.showListsModal() },
+            { label: 'Open Check Interval', meta: 'View', action: () => this.showIntervalSettings() },
             { label: 'Refresh All Items', meta: 'Action', action: () => this.refreshAll(), key: 'Ctrl+Shift+R' },
             { label: 'Open Settings', meta: 'Action', action: () => this.showSettingsModal() },
+            { label: 'Open Backups', meta: 'Action', action: () => this.showBackupsModal() },
             { label: 'Focus Add URL', meta: 'Action', action: () => document.getElementById('urlInput')?.focus() },
             { label: 'Run Extractor Lab', meta: 'Action', action: () => this.runExtractorLab() }
         ];
@@ -1733,10 +2078,10 @@ class App {
         container.innerHTML = this.commandResults.map((cmd, idx) => `
             <div class="command-item ${idx === this.commandSelectionIndex ? 'active' : ''}" data-idx="${idx}">
                 <div class="command-main">
-                    <div class="command-title" title="${cmd.label}">${cmd.label}</div>
-                    <div class="command-meta">${cmd.meta}</div>
+                    <div class="command-title" title="${this.escapeHtml(cmd.label)}">${this.escapeHtml(cmd.label)}</div>
+                    <div class="command-meta">${this.escapeHtml(cmd.meta)}</div>
                 </div>
-                ${cmd.key ? `<span class="command-key">${cmd.key}</span>` : ''}
+                ${cmd.key ? `<span class="command-key">${this.escapeHtml(cmd.key)}</span>` : ''}
             </div>
         `).join('');
 
@@ -1806,7 +2151,7 @@ class App {
             label.textContent = pendingList ? pendingList.name : 'Add to';
         }
         menu.innerHTML = this.lists.map(l => `
-            <button type="button" class="custom-select-option ${pendingListId === l.id ? 'is-selected' : ''}" onclick="app.selectAddItemList('${l.id}')">${this.escapeHtml(l.name)}</button>
+            <button type="button" class="custom-select-option ${pendingListId === l.id ? 'is-selected' : ''}" onclick="app.selectAddItemList('${this.escapeJsString(l.id)}')">${this.escapeHtml(l.name)}</button>
         `).join('');
     }
 
@@ -1848,7 +2193,6 @@ class App {
             const initialPrice = initialData.price !== null ? Number(initialData.price) : null;
 
             const newItem = {
-                id: Date.now().toString(),
                 url,
                 canonicalUrl,
                 selector: initialData.selectorUsed || null,
@@ -1875,9 +2219,18 @@ class App {
                 stockSource: initialAvailability.source || null
             };
 
-            this.items.push(newItem);
-            await this.saveToServer();
-            this.logAction('item.added', { itemId: newItem.id, name: newItem.name, listId: newItem.listId });
+            const data = await this.sendItemMutation(`${this.SERVER_URL}/items/create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    item: newItem,
+                    revision: this.itemsRevision
+                })
+            }, 'Failed to add item');
+            const createdItem = this.normalizeServerItems([data.item])[0] || data.item || newItem;
+            await this.loadLists();
+            this.renderListControls();
+            this.logAction('item.added', { itemId: createdItem.id, name: createdItem.name, listId: createdItem.listId });
             this.render();
             this.showToast(isInitialOutOfStock ? "Item Added (currently out of stock)" : "Item Added!", "success");
 
@@ -1901,11 +2254,19 @@ class App {
         this.closeAllMenus();
         if (!confirm("Are you sure you want to stop tracking this item?")) return;
         const deletedItem = this.items.find(i => i.id === id);
-        this.items = this.items.filter(i => i.id !== id);
-        await this.saveToServer();
-        this.logAction('item.deleted', { itemId: id, name: deletedItem?.name || '' });
-        this.render();
-        this.showToast("Item Removed", "success");
+        if (!deletedItem) return;
+        try {
+            await this.sendItemMutation(`${this.SERVER_URL}/items/${encodeURIComponent(id)}?revision=${encodeURIComponent(this.itemsRevision)}`, {
+                method: 'DELETE'
+            }, 'Failed to remove item');
+            await this.loadLists();
+            this.renderListControls();
+            this.logAction('item.deleted', { itemId: id, name: deletedItem.name || '' });
+            this.render();
+            this.showToast("Item Removed", "success");
+        } catch (e) {
+            this.showToast(e.message || 'Failed to remove item', 'error');
+        }
     }
 
     async moveItemToList(id, targetListId) {
@@ -1920,30 +2281,50 @@ class App {
             this.closeAllMenus();
             return;
         }
-        item.listId = targetListId;
-        await this.saveToServer();
-        this.logAction('item.moved_list', { itemId: id, toListId: targetListId, toListName: list.name });
-        await this.loadLists();
-        this.renderListControls();
-        this.render();
-        this.closeAllMenus();
-        this.showToast(`Moved to ${list.name}`, 'success');
+        try {
+            await this.sendItemMutation(`${this.SERVER_URL}/items/${encodeURIComponent(id)}/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    listId: targetListId,
+                    revision: this.itemsRevision
+                })
+            }, 'Failed to move item');
+            this.logAction('item.moved_list', { itemId: id, toListId: targetListId, toListName: list.name });
+            await this.loadLists();
+            this.renderListControls();
+            this.render();
+            this.closeAllMenus();
+            this.showToast(`Moved to ${list.name}`, 'success');
+        } catch (e) {
+            this.showToast(e.message || 'Failed to move item', 'error');
+        }
     }
 
     async togglePurchased(id) {
         const item = this.items.find(i => i.id === id);
         if (!item) return;
         const next = !Boolean(item.purchased);
-        item.purchased = next;
-        item.purchasedAt = next ? new Date().toISOString() : null;
-        await this.saveToServer();
-        this.logAction(next ? 'item.marked_purchased' : 'item.unmarked_purchased', {
-            itemId: item.id,
-            name: item.name
-        });
-        this.closeAllMenus();
-        this.render();
-        this.showToast(next ? `${item.name} marked as purchased` : `${item.name} marked as not purchased`, 'success');
+        try {
+            await this.sendItemMutation(`${this.SERVER_URL}/items/${encodeURIComponent(id)}/purchase`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    purchased: next,
+                    purchasedAt: next ? new Date().toISOString() : null,
+                    revision: this.itemsRevision
+                })
+            }, 'Failed to update purchased status');
+            this.logAction(next ? 'item.marked_purchased' : 'item.unmarked_purchased', {
+                itemId: item.id,
+                name: item.name
+            });
+            this.closeAllMenus();
+            this.render();
+            this.showToast(next ? `${item.name} marked as purchased` : `${item.name} marked as not purchased`, 'success');
+        } catch (e) {
+            this.showToast(e.message || 'Failed to update purchased status', 'error');
+        }
     }
 
     async refreshItem(id) {
@@ -1956,85 +2337,85 @@ class App {
         this.beginItemCheck(id);
 
         try {
-            const extracted = await this.scrapePrice(item.url, item.selector);
-            const price = extracted ? extracted.price : null;
-            const availability = extracted?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
+            let extracted = null;
+            let price = null;
+            let stockStatus = 'unknown';
+            let isOutOfStock = false;
             const previousStockStatus = String(item.stockStatus || 'unknown');
-            const stockStatus = availability.status || (price !== null ? 'in_stock' : 'unknown');
-            const isOutOfStock = stockStatus === 'out_of_stock';
 
-            if (price !== null || isOutOfStock) {
-                const oldPrice = item.currentPrice;
-                if (!isOutOfStock && price !== null) {
-                    item.currentPrice = price;
-                } else if (price !== null) {
-                    item.lastSeenPrice = Number(price);
+            try {
+                extracted = await this.scrapePrice(item.url, item.selector);
+                const availability = extracted?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
+                price = extracted ? extracted.price : null;
+                stockStatus = availability.status || (price !== null ? 'in_stock' : 'unknown');
+                isOutOfStock = stockStatus === 'out_of_stock';
+                if (price === null && !isOutOfStock) {
+                    throw new Error("Could not find price");
                 }
-                if (extracted && extracted.currency) item.currency = extracted.currency;
-                if (extracted && extracted.selectorUsed && !item.selector) item.selector = extracted.selectorUsed;
-                item.extractionConfidence = extracted && extracted.confidence ? extracted.confidence : (item.extractionConfidence || 0);
-                item.stockStatus = stockStatus;
-                item.stockConfidence = Number(availability.confidence || 0);
-                item.stockReason = availability.reason || '';
-                item.stockSource = availability.source || null;
-                if (previousStockStatus !== 'out_of_stock' && stockStatus === 'out_of_stock') {
-                    item.stockChangedAt = new Date().toISOString();
-                    item.stockTransition = 'out_of_stock';
-                } else if (previousStockStatus === 'out_of_stock' && stockStatus === 'in_stock') {
-                    item.stockChangedAt = new Date().toISOString();
-                    item.stockTransition = 'back_in_stock';
-                } else {
-                    item.stockTransition = null;
+            } catch (scrapeError) {
+                console.error(scrapeError);
+                try {
+                    await this.sendItemMutation(`${this.SERVER_URL}/items/${encodeURIComponent(id)}/check-result`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            revision: this.itemsRevision,
+                            expectedUrl: item.url,
+                            expectedSelector: item.selector || null,
+                            error: scrapeError.message || 'Check failed'
+                        })
+                    }, 'Failed to persist failed check result');
+                } catch (persistError) {
+                    this.render();
+                    this.showToast(persistError.message || 'Failed to update item state', "error");
+                    return;
                 }
-                item.lastChecked = new Date().toISOString();
-                item.lastCheckAttempt = new Date().toISOString();
-                item.lastCheckStatus = 'ok';
-                item.lastCheckError = '';
-                this.markItemCheckFlash(item.id, 10000);
-
-                // Add to history logic
-                if (!isOutOfStock && price !== null) {
-                    const last = item.history[item.history.length - 1];
-                    // If price changed OR it's been a day since last log
-                    if (!last || last.price !== price || (new Date() - new Date(last.date) > 86400000)) {
-                        item.history.push({
-                            date: new Date().toISOString(),
-                            price: price
-                        });
-                    }
-                }
-
-                await this.saveToServer(); // Save immediately
-                this.render(); // Re-render to show updates
-
-                if (previousStockStatus !== 'out_of_stock' && isOutOfStock) {
-                    this.showToast(`${item.name} is out of stock`, "error");
-                } else if (previousStockStatus === 'out_of_stock' && stockStatus === 'in_stock') {
-                    this.showToast(`${item.name} is back in stock`, "success");
-                } else if (price < oldPrice) {
-                    this.showToast(`Price drop! ${item.name}`, "success");
-                } else if (price > oldPrice) {
-                    this.showToast(`Price increased: ${item.name}`, "error");
-                } else {
-                    this.showToast(`Updated: ${item.name}`, "success");
-                }
-                this.logAction('item.refreshed', {
-                    itemId: item.id,
-                    stockStatus: stockStatus,
-                    price: price !== null ? Number(price) : null
-                });
-            } else {
-                throw new Error("Could not find price");
+                this.render();
+                this.showToast(`Failed to update ${item.name}`, "error");
+                return;
             }
 
-        } catch (e) {
-            console.error(e);
-            item.lastCheckAttempt = new Date().toISOString();
-            item.lastCheckStatus = 'fail';
-            item.lastCheckError = e.message || 'Check failed';
-            await this.saveToServer();
+            try {
+                await this.sendItemMutation(`${this.SERVER_URL}/items/${encodeURIComponent(id)}/check-result`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        revision: this.itemsRevision,
+                        expectedUrl: item.url,
+                        expectedSelector: item.selector || null,
+                        extraction
+                    })
+                }, 'Failed to persist refresh result');
+            } catch (persistError) {
+                this.render();
+                this.showToast(persistError.message || `Failed to update ${item.name}`, "error");
+                return;
+            }
+
+            this.markItemCheckFlash(id, 10000);
             this.render();
-            this.showToast(`Failed to update ${item.name}`, "error");
+
+            if (previousStockStatus !== 'out_of_stock' && isOutOfStock) {
+                this.showToast(`${item.name} is out of stock`, "error");
+            } else if (previousStockStatus === 'out_of_stock' && stockStatus === 'in_stock') {
+                this.showToast(`${item.name} is back in stock`, "success");
+            } else if (price < item.currentPrice) {
+                this.showToast(`Price drop! ${item.name}`, "success");
+            } else if (price > item.currentPrice) {
+                this.showToast(`Price increased: ${item.name}`, "error");
+            } else {
+                this.showToast(`Updated: ${item.name}`, "success");
+            }
+            this.logAction('item.refreshed', {
+                itemId: item.id,
+                stockStatus: stockStatus,
+                price: price !== null ? Number(price) : null
+            });
+        } catch (e) {
+            try {
+                this.render();
+                this.showToast(e.message || `Failed to update ${item.name}`, "error");
+            } catch (_) { }
             return;
         } finally {
             this.endItemCheck(id);
@@ -2049,12 +2430,14 @@ class App {
         // OR trigger backend endpoint
         // Let's use backend endpoint for efficiency
         try {
-            await fetch(`${this.SERVER_URL}/check-now`, { method: 'POST' });
+            const res = await fetch(`${this.SERVER_URL}/check-now`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Failed to trigger background check');
             this.showToast('Background check started...', 'success');
             this.logAction('check.started_manual');
             this.startRefreshStatusPolling();
         } catch (e) {
-            this.showToast('Failed to trigger background check', 'error');
+            this.showToast(e.message || 'Failed to trigger background check', 'error');
         } finally {
             setTimeout(() => btn.classList.remove('state-loading'), 1000);
         }
@@ -2114,8 +2497,10 @@ class App {
 
             // Complex Sorts
             const getDiscount = (item) => {
-                if (item.history.length < 2) return 0;
-                const max = Math.max(...item.history.map(h => h.price));
+                const history = Array.isArray(item.history) ? item.history : [];
+                if (history.length < 2) return 0;
+                const max = Math.max(...history.map(h => h.price).filter(Number.isFinite));
+                if (!Number.isFinite(max) || !Number.isFinite(item.currentPrice) || max <= 0) return 0;
                 return ((max - item.currentPrice) / max); // % discount
             };
 
@@ -2164,6 +2549,41 @@ class App {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+    }
+
+    escapeJsString(value) {
+        return String(value || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '\\r')
+            .replace(/\n/g, '\\n')
+            .replace(/<\/(script)/ig, '<\\/$1');
+    }
+
+    getSafeExternalUrl(rawUrl) {
+        try {
+            const parsed = new URL(String(rawUrl || '').trim());
+            if (!['http:', 'https:'].includes(parsed.protocol)) return '#';
+            return parsed.toString();
+        } catch {
+            return '#';
+        }
+    }
+
+    getDisplayHostname(rawUrl) {
+        try {
+            return new URL(String(rawUrl || '').trim()).hostname.replace(/^www\./, '') || 'Invalid link';
+        } catch {
+            return 'Invalid link';
+        }
+    }
+
+    getDomSafeId(value, prefix = '') {
+        const normalized = String(value || '')
+            .split('')
+            .map((char) => /[A-Za-z0-9_-]/.test(char) ? char : `_x${char.charCodeAt(0).toString(16)}_`)
+            .join('');
+        return `${prefix}${normalized || 'empty'}`;
     }
 
     getStockMeta(item) {
@@ -2240,7 +2660,7 @@ class App {
 
     updateRelativeTimes() {
         this.items.forEach(item => {
-            const cell = document.querySelector(`.checked-cell[data-item-id="${item.id}"]`);
+            const cell = document.querySelector(`.checked-cell[data-item-dom-id="${this.getDomSafeId(item.id, 'item-')}"]`);
             if (!cell) return;
             const meta = this.getLastCheckMeta(item);
             cell.textContent = meta.text;
@@ -2259,7 +2679,7 @@ class App {
     getTrendMeta(item) {
         let trendClass = 'neutral';
         let trendText = 'Stable';
-        const history = item.history || [];
+        const history = Array.isArray(item.history) ? item.history : [];
         if (history.length >= 2) {
             const prevPrice = history[history.length - 2] ? history[history.length - 2].price : item.currentPrice;
             if (item.currentPrice < prevPrice) {
@@ -2269,18 +2689,14 @@ class App {
                 trendClass = 'up';
                 trendText = '&#9650; Rise';
             }
-            const minPrice = Math.min(...history.map(h => h.price));
-            if (item.currentPrice <= minPrice && history.length > 3) {
-                trendText = '&#9733; Best Price';
-                trendClass = 'best';
-            }
         }
         return { trendClass, trendText };
     }
 
     buildMiniSparkline(hist, color) {
-        if (!hist || hist.length < 2) return '';
-        const data = hist.map(h => h.price);
+        if (!Array.isArray(hist) || hist.length < 2) return '';
+        const data = hist.map(h => h.price).filter(Number.isFinite);
+        if (data.length < 2) return '';
         const max = Math.max(...data);
         const min = Math.min(...data);
         const w = 120;
@@ -2307,7 +2723,7 @@ class App {
     }
 
     getBestValueBadge(item) {
-        const history = item.history || [];
+        const history = Array.isArray(item.history) ? item.history : [];
         if (history.length <= 3) return '';
 
         const allPrices = history.map(x => x.price);
@@ -2350,6 +2766,8 @@ class App {
     switchView(view) {
         const header = document.getElementById('mainHeader');
         if (header) header.classList.remove('menu-open');
+        const metrics = document.getElementById('dashboardMetrics');
+        if (metrics) metrics.hidden = view !== 'portfolio';
         this.activeView = view;
         localStorage.setItem('pt_active_view', view);
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -2368,6 +2786,9 @@ class App {
         });
         if (view === 'alerts') {
             this.fillAlertRulesForm();
+            this.fillSettingsForm();
+            this.renderListsManager();
+            void this.renderBackupsList();
             return;
         }
         if (view === 'audit') {
@@ -2510,7 +2931,7 @@ class App {
             return (b.timeMs || 0) - (a.timeMs || 0);
         });
         list.innerHTML = alerts.map(a => `
-            <div class="alert-row ${a.severity}" onclick="app.showHistoryModal('${a.id}')">
+            <div class="alert-row ${a.severity}" onclick="app.showHistoryModal('${this.escapeJsString(a.id)}')">
                 <div class="alert-title">${this.escapeHtml(a.title)}</div>
                 <div class="alert-meta">${this.escapeHtml(a.meta || '')}</div>
             </div>
@@ -2526,22 +2947,31 @@ class App {
             return;
         }
 
-        list.innerHTML = items.map((item) => `
-            <div class="purchased-row">
-                <div class="purchased-main">
-                    <div class="purchased-title">${this.escapeHtml(item.name)}</div>
-                    <div class="purchased-meta">
-                        ${item.purchasedAt ? new Date(item.purchasedAt).toLocaleString() : 'n/a'} | ${this.escapeHtml(this.getListName(item.listId || 'default'))}
-                        ${item.currentPrice ? ` | ${this.formatPrice(item.currentPrice, this.getCurrency(item))}` : ''}
+        list.innerHTML = items.map((item) => {
+            const safeItemId = this.escapeJsString(item.id);
+            const safeUrl = this.escapeHtml(this.getSafeExternalUrl(item.url));
+            return `
+                <div class="purchased-row">
+                    <div class="purchased-main">
+                        <div class="purchased-title">${this.escapeHtml(item.name)}</div>
+                        <div class="purchased-meta">
+                            ${item.purchasedAt ? new Date(item.purchasedAt).toLocaleString() : 'n/a'} | ${this.escapeHtml(this.getListName(item.listId || 'default'))}
+                            ${item.currentPrice ? ` | ${this.formatPrice(item.currentPrice, this.getCurrency(item))}` : ''}
+                        </div>
+                    </div>
+                    <div class="purchased-actions">
+                        <button class="icon-btn purchased-action-btn" onclick="app.togglePurchased('${safeItemId}')">Restore</button>
+                        <a class="icon-btn purchased-action-btn" href="${safeUrl}" target="_blank" rel="noopener">Open</a>
+                        <button class="icon-btn purchased-action-btn danger purchased-remove-btn" onclick="app.deleteItem('${safeItemId}')" aria-label="Remove purchased item">
+                            <svg class="purchased-remove-icon" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16" />
+                            </svg>
+                            <span class="purchased-remove-label">Remove</span>
+                        </button>
                     </div>
                 </div>
-                <div class="purchased-actions">
-                    <button class="icon-btn purchased-action-btn" onclick="app.togglePurchased('${item.id}')">Restore</button>
-                    <a class="icon-btn purchased-action-btn" href="${this.escapeHtml(item.url)}" target="_blank" rel="noopener">Open</a>
-                    <button class="icon-btn purchased-action-btn danger" onclick="app.deleteItem('${item.id}')">Remove</button>
-                </div>
-            </div>
-        `).join('');
+            `;
+        }).join('');
     }
 
     async runExtractorLab() {
@@ -2570,20 +3000,20 @@ class App {
                 .map(s => s.selector)
                 .filter(s => s && s !== '(text candidate)')
                 .slice(0, 6)
-                .map(sel => `<button class="icon-btn" style="width:auto;height:auto;padding:0.3rem 0.6rem;" onclick="document.getElementById('labSelectorInput').value='${sel.replace(/'/g, "\\'")}';">${sel}</button>`)
+                .map(sel => `<button class="icon-btn" style="width:auto;height:auto;padding:0.3rem 0.6rem;" onclick="document.getElementById('labSelectorInput').value='${this.escapeJsString(sel)}';">${this.escapeHtml(sel)}</button>`)
                 .join('');
 
             if (resultEl) {
                 resultEl.innerHTML = `
                     <div class="lab-grid">
                         <div><span class="lab-label">Price:</span> ${data.price !== null && data.price !== undefined ? this.formatPrice(Number(data.price), data.currency || 'USD') : 'Not found'}</div>
-                        <div><span class="lab-label">Currency:</span> ${data.currency || 'n/a'}</div>
+                        <div><span class="lab-label">Currency:</span> ${this.escapeHtml(data.currency || 'n/a')}</div>
                         <div><span class="lab-label">Confidence:</span> ${this.formatConfidence(data.confidence)}</div>
-                        <div><span class="lab-label">Source:</span> ${data.source || 'n/a'}</div>
-                        <div><span class="lab-label">Stock:</span> ${data.availability?.status || 'unknown'}</div>
+                        <div><span class="lab-label">Source:</span> ${this.escapeHtml(data.source || 'n/a')}</div>
+                        <div><span class="lab-label">Stock:</span> ${this.escapeHtml(data.availability?.status || 'unknown')}</div>
                         <div><span class="lab-label">Stock Confidence:</span> ${this.formatConfidence(data.availability?.confidence)}</div>
-                        <div><span class="lab-label">Selector Used:</span> ${data.selectorUsed || 'none'}</div>
-                        <div class="lab-title"><span class="lab-label">Title:</span> ${data.title || 'n/a'}</div>
+                        <div><span class="lab-label">Selector Used:</span> ${this.escapeHtml(data.selectorUsed || 'none')}</div>
+                        <div class="lab-title"><span class="lab-label">Title:</span> ${this.escapeHtml(data.title || 'n/a')}</div>
                         <div class="lab-title"><span class="lab-label">Stock Reason:</span> ${this.escapeHtml(data.availability?.reason || 'n/a')}</div>
                         <div class="lab-title"><span class="lab-label">Stock Source:</span> ${this.escapeHtml(data.availability?.source || 'n/a')}</div>
                         <div class="lab-title"><span class="lab-label">Debug:</span> <code>${this.escapeHtml(JSON.stringify(data.debug || {}, null, 0))}</code></div>
@@ -2595,7 +3025,7 @@ class App {
                 `;
             }
         } catch (e) {
-            if (resultEl) resultEl.innerHTML = `<span style="color:var(--danger)">Error: ${e.message}</span>`;
+            if (resultEl) resultEl.textContent = `Error: ${e.message}`;
         } finally {
             if (runBtn) runBtn.classList.remove('state-loading');
         }
@@ -2637,27 +3067,36 @@ class App {
             const hitClass = isTargetHit ? 'target-hit-glow' : '';
             const checkClass = this.getItemCheckClass(item);
             const badgeHtml = this.getBestValueBadge(item);
-            const badgeBlock = badgeHtml ? `<div class="badge-container">${badgeHtml}</div>` : '';
+            const trendBadgeBlock = badgeHtml ? `<div class="badge-container trend-badge-container">${badgeHtml}</div>` : '';
+            const safeItemId = this.escapeJsString(item.id);
+            const safeItemName = this.escapeHtml(item.name);
+            const safeItemUrl = this.escapeHtml(this.getSafeExternalUrl(item.url));
+            const safeItemHost = this.escapeHtml(this.getDisplayHostname(item.url));
+            const safeListName = this.escapeHtml(this.getListName(item.listId || 'default'));
+            const safeItemDomId = this.getDomSafeId(item.id, 'item-');
+            const safeRefreshDomId = this.getDomSafeId(item.id, 'refresh-');
+            const safeMenuDomId = this.getDomSafeId(item.id, 'menu-');
             const moveToOptions = this.lists
                 .filter(l => l.id !== (item.listId || 'default'))
-                .map(l => `<button class="actions-menu-item" onclick="event.stopPropagation(); app.moveItemToList('${item.id}','${l.id}')">${l.name}</button>`)
+                .map(l => `<button class="actions-menu-item" onclick="event.stopPropagation(); app.moveItemToList('${safeItemId}','${this.escapeJsString(l.id)}')">${this.escapeHtml(l.name)}</button>`)
                 .join('');
             const purchaseActionLabel = item.purchased ? 'Mark as Not Purchased' : 'Mark as Purchased';
             const lastCheckMeta = this.getLastCheckMeta(item);
             const priceCellHtml = stockMeta.isOut
-                ? `${badgeBlock}<div class="stock-warning" title="${this.escapeHtml(stockMeta.title)}">Out of Stock</div>${item.currentPrice ? `<div class="stock-last-price">Last seen: ${priceStr}</div>` : ''}`
-                : `${badgeBlock}<div>${priceStr}</div>${targetHtml}`;
+                ? `<div class="stock-warning" title="${this.escapeHtml(stockMeta.title)}">Out of Stock</div>${item.currentPrice ? `<div class="stock-last-price">Last seen: ${priceStr}</div>` : ''}`
+                : `<div>${priceStr}</div>${targetHtml}`;
 
             const div = document.createElement('div');
             div.className = `list-item ${hitClass} ${checkClass}`;
             div.setAttribute('data-id', item.id);
+            div.setAttribute('data-dom-id', safeItemDomId);
             div.innerHTML = `
-                <div class="item-main" onclick="app.showHistoryModal('${item.id}')">
-                    <div class="item-title" title="${item.name}">${item.name}</div>
-                    <a href="${item.url}" target="_blank" class="item-link" onclick="event.stopPropagation()">${new URL(item.url).hostname.replace('www.', '')}</a>
+                <div class="item-main" onclick="app.showHistoryModal('${safeItemId}')">
+                    <div class="item-title" title="${safeItemName}">${safeItemName}</div>
+                    <a href="${safeItemUrl}" target="_blank" rel="noopener" class="item-link" onclick="event.stopPropagation()">${safeItemHost}</a>
                 </div>
                 <div class="list-cell">
-                    <span class="status-badge status-ok">${this.getListName(item.listId || 'default')}</span>
+                    <span class="status-badge status-ok">${safeListName}</span>
                 </div>
                 <div class="price-cell">
                     ${priceCellHtml}
@@ -2668,6 +3107,7 @@ class App {
                 </div>
                 <div class="trend-cell">
                     <span class="trend-badge ${trendClass}">${trendText}</span>
+                    ${trendBadgeBlock}
                 </div>
                 <div class="confidence-cell">
                     <span class="confidence-badge ${confidence.className}">${confidence.text}</span>
@@ -2675,18 +3115,18 @@ class App {
                 <div class="status-cell">
                     <span class="status-badge ${status.className}" title="${this.escapeHtml(stockMeta.title)}">${status.text}</span>
                 </div>
-                <div class="checked-cell ${lastCheckMeta.className}" data-item-id="${item.id}" title="${lastCheckMeta.title}">${lastCheckMeta.text}</div>
+                <div class="checked-cell ${lastCheckMeta.className}" data-item-dom-id="${safeItemDomId}" title="${this.escapeHtml(lastCheckMeta.title)}">${this.escapeHtml(lastCheckMeta.text)}</div>
                 <div class="actions-cell">
-                    <button class="icon-btn" onclick="app.refreshItem('${item.id}')" id="refresh-${item.id}" title="Refresh">
+                    <button class="icon-btn" onclick="app.refreshItem('${safeItemId}')" id="${safeRefreshDomId}" title="Refresh">
                         <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                     </button>
-                    <button class="icon-btn" onclick="app.toggleItemMenu(event, '${item.id}')" title="More Actions">
+                    <button class="icon-btn" onclick="app.toggleItemMenu(event, '${safeItemId}')" title="More Actions">
                         <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                             <circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="5" r="1.5" fill="currentColor"/><circle cx="12" cy="19" r="1.5" fill="currentColor"/>
                         </svg>
                     </button>
-                    <div class="actions-menu" id="menu-${item.id}" onclick="event.stopPropagation()">
-                        <button class="actions-menu-item" onclick="event.stopPropagation(); app.showDoctorModal('${item.id}')">
+                    <div class="actions-menu" id="${safeMenuDomId}" onclick="event.stopPropagation()">
+                        <button class="actions-menu-item" onclick="event.stopPropagation(); app.showDoctorModal('${safeItemId}')">
                             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                 <path d="M4 3a2 2 0 1 0 4 0M4 3v4a3 3 0 0 0 6 0V3M7 10v4a5 5 0 0 0 10 0v-2" />
                                 <circle cx="17" cy="10" r="2" />
@@ -2704,13 +3144,13 @@ class App {
                                 ${moveToOptions || '<div class="actions-menu-item" style="cursor:default; opacity:0.7;">No other lists</div>'}
                             </div>
                         </div>
-                        <button class="actions-menu-item success" onclick="event.stopPropagation(); app.togglePurchased('${item.id}')">
+                        <button class="actions-menu-item success" onclick="event.stopPropagation(); app.togglePurchased('${safeItemId}')">
                             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                 <path d="M5 13l4 4L19 7" />
                             </svg>
                             <span class="actions-menu-label">${purchaseActionLabel}</span>
                         </button>
-                        <button class="actions-menu-item danger" onclick="event.stopPropagation(); app.deleteItem('${item.id}')">
+                        <button class="actions-menu-item danger" onclick="event.stopPropagation(); app.deleteItem('${safeItemId}')">
                             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                             <span class="actions-menu-label">Remove Item</span>
                         </button>
@@ -2743,7 +3183,9 @@ class App {
         this.renderListControls();
         this.refreshDashboardMetrics();
         this.renderAlertsPanel();
-        if (this.activeView === 'audit') {
+        if (this.activeView === 'alerts') {
+            this.renderListsManager();
+        } else if (this.activeView === 'audit') {
             this.renderDiagnosticsPanel();
         } else if (this.activeView === 'purchased') {
             this.renderPurchasedPanel();
@@ -2761,11 +3203,13 @@ class App {
 
         modalTitle.textContent = item.name;
         const currency = this.getCurrency(item);
+        const safeItemUrl = this.escapeHtml(this.getSafeExternalUrl(item.url));
+        const safeItemUrlLabel = this.escapeHtml(String(item.url || ''));
 
         // Get trend info for display
         let trendIcon = '';
         let trendColor = 'var(--text-muted)';
-        const history = item.history || [];
+        const history = Array.isArray(item.history) ? item.history : [];
         if (history.length >= 2) {
             const prevPrice = history[history.length - 2] ? history[history.length - 2].price : item.currentPrice;
             if (item.currentPrice < prevPrice) {
@@ -2786,37 +3230,37 @@ class App {
 
         modalBody.innerHTML = `
             <div class="modal-info-grid">
-                <div class="info-item">
+                <div class="info-item info-item-current">
                     <div class="info-label">Current Price</div>
-                    <div class="info-value" style="color: var(--text-main); display: flex; align-items: center; gap: 0.5rem;">
-                        ${this.formatPrice(item.currentPrice, currency)}
-                        <span style="font-size: 0.8em;">${trendIcon}</span>
+                    <div class="info-value info-value-inline">
+                        <span>${this.formatPrice(item.currentPrice, currency)}</span>
+                        <span class="info-trend-slot">${trendIcon}</span>
                     </div>
                 </div>
                 <div class="info-item">
                     <div class="info-label">All-time Low</div>
-                    <div class="info-value" style="font-size: 1.1rem; color: var(--success);">
+                    <div class="info-value info-value-compact info-value-success">
                         ${this.formatPrice(allTimeLow, currency)}
                     </div>
-                    <div style="font-size: 0.7rem; color: var(--text-muted);">${this.formatDate(lowDate)}</div>
+                    <div class="info-note">${this.formatDate(lowDate)}</div>
                 </div>
                 <div class="info-item">
                     <div class="info-label">All-time High</div>
-                    <div class="info-value" style="font-size: 1.1rem; color: var(--danger);">
+                    <div class="info-value info-value-compact info-value-danger">
                         ${this.formatPrice(allTimeHigh, currency)}
                     </div>
-                    <div style="font-size: 0.7rem; color: var(--text-muted);">${this.formatDate(highDate)}</div>
+                    <div class="info-note">${this.formatDate(highDate)}</div>
                 </div>
 
-                <div class="info-item" style="grid-column: span 2;">
+                <div class="info-item info-item-wide">
                     <div class="info-label">Product Link</div>
-                    <a href="${item.url}" target="_blank" class="info-value" style="font-size: 0.9rem; color: var(--accent); text-decoration: none; word-break: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%;">
-                        ${item.url}
+                    <a href="${safeItemUrl}" target="_blank" rel="noopener" class="info-value info-link">
+                        ${safeItemUrlLabel}
                     </a>
                 </div>
                 <div class="info-item">
                     <div class="info-label">Last Checked</div>
-                    <div class="info-value" style="font-size: 1rem;">${app.getRelativeTime(item.lastChecked)}</div>
+                    <div class="info-value info-value-compact">${app.getRelativeTime(item.lastChecked)}</div>
                 </div>
             </div>
         `;
@@ -2832,7 +3276,8 @@ class App {
             }
         }
         const sparklineColor = trendClass === 'up' ? '#ef4444' : (trendClass === 'down' ? '#22c55e' : '#38bdf8');
-        const sl = Sparkline.generate(item.history, 600, 300, sparklineColor, `modal-chart-${item.id}`);
+        const modalChartKey = `modal-chart-${this.getDomSafeId(item.id, 'item-')}`;
+        const sl = Sparkline.generate(item.history, 600, 300, sparklineColor, modalChartKey);
 
         if (!sl.html) {
             modalChart.innerHTML = `
@@ -2848,13 +3293,16 @@ class App {
         // Store interaction data for modal chart
         if (sl.data) {
             if (!this.sparklineData) this.sparklineData = {};
-            this.sparklineData[`modal-chart-${item.id}`] = sl.data;
+            this.sparklineData[modalChartKey] = {
+                points: sl.data,
+                currency
+            };
         }
 
         // Add hover listeners for the modal chart
         const svgElement = modalChart.querySelector('svg');
         if (svgElement) {
-            svgElement.onmousemove = (evt) => this.handleSparklineHover(evt, `modal-chart-${item.id}`, svgElement);
+            svgElement.onmousemove = (evt) => this.handleSparklineHover(evt, modalChartKey, svgElement);
             svgElement.onmouseleave = () => this.handleSparklineLeave(svgElement);
         }
 
@@ -2896,7 +3344,10 @@ class App {
     handleSparklineHover(evt, itemId, svg) {
         if (!this.sparklineData || !this.sparklineData[itemId]) return;
 
-        const data = this.sparklineData[itemId];
+        const chartEntry = this.sparklineData[itemId];
+        const data = Array.isArray(chartEntry) ? chartEntry : chartEntry.points;
+        const currency = chartEntry && !Array.isArray(chartEntry) ? chartEntry.currency : 'USD';
+        if (!Array.isArray(data) || !data.length) return;
         const rect = svg.getBoundingClientRect();
 
         // Dynamically get SVG coordinate system width/height
@@ -2933,7 +3384,7 @@ class App {
 
             const tooltip = svg.parentNode.querySelector('.chart-tooltip');
             if (tooltip) {
-                tooltip.innerHTML = `<strong>${app.formatPrice(nearest.price, app.getCurrency(app.items.find(i => itemId.includes(i.id)) || { url: '' }))}</strong><br>${app.formatDate(nearest.date)}`;
+                tooltip.innerHTML = `<strong>${this.escapeHtml(this.formatPrice(nearest.price, currency || 'USD'))}</strong><br>${this.escapeHtml(this.formatDate(nearest.date))}`;
                 tooltip.style.display = 'block';
 
                 // Calculate offset relative to the container (accounting for padding)
@@ -2979,139 +3430,230 @@ class App {
 
     showToast(msg, type = 'success') {
         const t = document.getElementById('toast');
+        if (!t) return;
         t.textContent = msg;
         t.className = `toast show ${type}`;
-        setTimeout(() => {
+        if (this.toastTimer) {
+            clearTimeout(this.toastTimer);
+        }
+        this.toastTimer = setTimeout(() => {
             t.classList.remove('show');
+            this.toastTimer = null;
         }, 3000);
+    }
+
+    downloadTextFile(filename, content, mimeType = 'text/plain;charset=utf-8') {
+        const blob = new Blob([content], { type: mimeType });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', objectUrl);
+        anchor.setAttribute('download', filename);
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    }
+
+    toCsvCell(value) {
+        const stringValue = value == null ? '' : String(value);
+        const formulaGuard = /^[=+\-@]/.test(stringValue.trimStart()) ? `'${stringValue}` : stringValue;
+        return `"${formulaGuard.replace(/"/g, '""')}"`;
     }
 
     // --- Data Export/Import ---
     exportToJSON() {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(this.items, null, 2));
-        const anchor = document.createElement('a');
-        anchor.setAttribute("href", dataStr);
-        anchor.setAttribute("download", `centsible_export_${new Date().toISOString().split('T')[0]}.json`);
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        this.showToast("JSON Exported");
-        this.logAction('export.json', { itemCount: this.items.length });
+        this.exportBackup();
+    }
+
+    async exportBackup() {
+        try {
+            const res = await fetch(`${this.SERVER_URL}/backups/export`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Failed to export backup');
+
+            const filename = data.filename || `centsible-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+            this.downloadTextFile(
+                filename,
+                JSON.stringify(data.backup, null, 2),
+                'application/json;charset=utf-8'
+            );
+            this.showToast("Encrypted backup exported");
+            this.logAction('backup.exported', { filename });
+        } catch (e) {
+            this.showToast(e.message || 'Failed to export backup', 'error');
+        }
+    }
+
+    async refreshAfterBackupMutation() {
+        await Promise.all([
+            this.loadSettings(),
+            this.loadLists(),
+            this.loadAlertRules(),
+            this.loadAuditLog({ silent: true })
+        ]);
+        await this.loadFromServer();
+        this.renderListControls();
+        this.fillAlertRulesForm();
+        this.fillSettingsForm();
+        this.syncCheckIntervalUI();
+        this.render();
+        this.renderListsManager();
+        await this.renderBackupsList();
+    }
+
+    formatBackupPreview(preview = {}) {
+        if (preview && preview.corrupt) {
+            return preview.error || 'Unreadable backup file';
+        }
+        return `Items: ${preview.itemCount ?? 'n/a'} | Lists: ${preview.listCount ?? 'n/a'} | Purchased: ${preview.purchasedCount ?? 'n/a'} | Audit: ${preview.auditCount ?? 'n/a'} | Diagnostics: ${preview.diagnosticsCount ?? 'n/a'} | Range: ${preview.rangeStart ? this.formatDate(preview.rangeStart) : '-'} -> ${preview.rangeEnd ? this.formatDate(preview.rangeEnd) : '-'}`;
+    }
+
+    getBackupImportSummary(parsed) {
+        if (parsed && typeof parsed === 'object' && parsed.encrypted && parsed.preview) {
+            return this.formatBackupPreview(parsed.preview);
+        }
+        if (Array.isArray(parsed)) {
+            return `Items: ${parsed.length} | Format: unsupported backup`;
+        }
+        if (parsed && typeof parsed === 'object' && Array.isArray(parsed.items)) {
+            return `Items: ${parsed.items.length} | Format: unsupported unencrypted backup`;
+        }
+        return 'Encrypted full-state backup';
     }
 
     exportToCSV() {
         if (!this.items.length) return this.showToast("No data to export", "error");
 
-        let csvContent = "data:text/csv;charset=utf-8,";
-        csvContent += "Name,List,URL,Current Price,Target Price,Last Checked\n";
+        const rows = [
+            ['Name', 'List', 'URL', 'Current Price', 'Target Price', 'Last Checked'],
+            ...this.items.map(item => ([
+                item.name || '',
+                this.getListName(item.listId || 'default'),
+                item.url || '',
+                item.currentPrice ?? '',
+                item.targetPrice ?? '',
+                item.lastChecked || ''
+            ]))
+        ];
 
-        this.items.forEach(item => {
-            const row = [
-                `"${item.name.replace(/"/g, '""')}"`,
-                `"${this.getListName(item.listId || 'default').replace(/"/g, '""')}"`,
-                `"${item.url}"`,
-                item.currentPrice,
-                item.targetPrice || "",
-                `"${item.lastChecked}"`
-            ].join(",");
-            csvContent += row + "\n";
-        });
+        const csvContent = rows
+            .map(row => row.map(value => this.toCsvCell(value)).join(','))
+            .join('\n');
 
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `centsible_export_${new Date().toISOString().split('T')[0]}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
+        this.downloadTextFile(
+            `centsible_export_${new Date().toISOString().split('T')[0]}.csv`,
+            csvContent,
+            'text/csv;charset=utf-8'
+        );
         this.showToast("CSV Exported");
         this.logAction('export.csv', { itemCount: this.items.length });
     }
 
-    handleImport(event) {
+    async handleImport(event) {
         const file = event.target.files[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-            try {
-                const imported = JSON.parse(e.target.result);
-                if (Array.isArray(imported)) {
-                    if (confirm(`Are you sure you want to import ${imported.length} items? This will REPLACE your current list.`)) {
-                        this.items = imported.map(item => ({
-                            ...item,
-                            canonicalUrl: item.canonicalUrl || this.normalizeTrackedUrl(item.url),
-                            purchased: Boolean(item.purchased),
-                            purchasedAt: item.purchasedAt || null
-                        }));
-                        await this.saveToServer();
-                        this.render();
-                        this.showToast("Data Imported Successfully");
-                        this.logAction('import.json_replace', { itemCount: imported.length });
-                    }
-                } else {
-                    throw new Error("Invalid Format");
-                }
-            } catch (err) {
-                this.showToast("Import failed: Select a valid JSON file", "error");
+
+        try {
+            const raw = await file.text();
+            const parsed = JSON.parse(raw);
+            const isEncrypted = Boolean(parsed && typeof parsed === 'object' && parsed.encrypted && parsed.ciphertext && parsed.encryption);
+            if (!isEncrypted) {
+                throw new Error('Only encrypted backups are supported');
             }
-        };
-        reader.readAsText(file);
-        // Clear input
-        event.target.value = '';
+            const summaryText = this.getBackupImportSummary(parsed);
+            let password = '';
+
+            if (!confirm(`Import ${file.name}? This will overwrite your current app state.\n${summaryText}`)) {
+                return;
+            }
+
+            password = prompt(`Enter the backup password for ${file.name}:`) || '';
+            if (!password) throw new Error('Backup password is required');
+
+            const res = await fetch(`${this.SERVER_URL}/backups/import`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ backup: parsed, password })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) throw new Error(data.error || 'Import failed');
+
+            await this.refreshAfterBackupMutation();
+            this.showToast("Backup imported successfully");
+            this.logAction('backup.imported', { filename: file.name, encrypted: true });
+        } catch (err) {
+            this.showToast(err.message || "Import failed: Select a valid backup file", "error");
+        } finally {
+            event.target.value = '';
+        }
     }
 
     // --- Backups Management ---
-    async showBackupsModal() {
-        const modal = document.getElementById('backupsModal');
+    async renderBackupsList() {
         const list = document.getElementById('backupsList');
-        list.innerHTML = '<div style="text-align:center; padding: 2rem;">Loading backups...</div>';
-        modal.classList.add('active');
-        modal.style.pointerEvents = 'auto';
+        if (!list) return;
 
-        // Close menu if open
-        document.getElementById('mainHeader').classList.remove('menu-open');
+        list.innerHTML = '<div style="text-align:center; padding: 2rem;">Loading backups...</div>';
+        this.updateBackupPasswordStatus();
 
         try {
             const response = await fetch(`${this.SERVER_URL}/backups`);
-            const backups = await response.json();
+            const backups = await response.json().catch(() => ([]));
+            if (!response.ok) {
+                throw new Error(backups && backups.error ? backups.error : 'Failed to load backups');
+            }
+            if (!Array.isArray(backups)) {
+                throw new Error('Backups response is invalid');
+            }
 
             if (!backups.length) {
                 list.innerHTML = '<div style="text-align:center; padding: 2rem; color: var(--text-muted);">No backups found on server.</div>';
                 return;
             }
 
-            list.innerHTML = backups.map(b => `
-                <div class="backup-item">
-                    <div class="backup-info">
-                        <div class="backup-name">${b.name}</div>
-                        <div class="backup-date">${this.formatDate(b.date)} at ${new Date(b.date).toLocaleTimeString()}</div>
-                        <div class="backup-date">
-                            Items: ${b.preview && b.preview.itemCount !== null ? b.preview.itemCount : 'n/a'}
-                            | Lists: ${b.preview && b.preview.listCount !== null ? b.preview.listCount : 'n/a'}
-                            | Purchased: ${b.preview && b.preview.purchasedCount !== null ? b.preview.purchasedCount : 'n/a'}
-                            | Audit: ${b.preview && b.preview.auditCount !== null ? b.preview.auditCount : 'n/a'}
-                            | Diagnostics: ${b.preview && b.preview.diagnosticsCount !== null ? b.preview.diagnosticsCount : 'n/a'}
-                            | Range: ${b.preview && b.preview.rangeStart ? this.formatDate(b.preview.rangeStart) : '-'} -> ${b.preview && b.preview.rangeEnd ? this.formatDate(b.preview.rangeEnd) : '-'}
+            list.innerHTML = backups.map((b) => {
+                const preview = b.preview || {};
+                const flags = [
+                    preview.corrupt ? 'Corrupt' : (preview.unsupported ? 'Unsupported' : (b.encrypted ? 'Encrypted' : 'Legacy')),
+                    preview.includesHistory ? 'History' : null,
+                    preview.includesWebhookSettings ? 'Webhooks' : null
+                ].filter(Boolean).join(' | ');
+                const safeBackupName = this.escapeHtml(b.name);
+                const safeBackupId = this.escapeJsString(b.name);
+                const restoreDisabled = Boolean(preview.unsupported || preview.corrupt);
+                const restoreDisabledTitle = preview.corrupt
+                    ? `disabled title="${this.escapeHtml(preview.error || 'Backup file is unreadable')}"`
+                    : (preview.unsupported ? 'disabled title="Unsupported legacy backup"' : '');
+                return `
+                    <div class="backup-item">
+                        <div class="backup-info">
+                            <div class="backup-name">${safeBackupName}</div>
+                            <div class="backup-date">${this.formatDate(b.date)} at ${new Date(b.date).toLocaleTimeString()}</div>
+                            <div class="backup-date">${this.escapeHtml(this.formatBackupPreview(preview))}</div>
+                            <div class="backup-flags">${this.escapeHtml(flags)}</div>
+                        </div>
+                        <div class="backup-actions">
+                            <button class="restore-btn" onclick="app.restoreFromBackup('${safeBackupId}')" ${restoreDisabled ? restoreDisabledTitle : ''}>Restore</button>
                         </div>
                     </div>
-                    <div class="backup-actions">
-                        <button class="restore-btn" onclick="app.restoreFromBackup('${b.name}')">Restore</button>
-                    </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         } catch (e) {
             list.innerHTML = '<div style="text-align:center; padding: 2rem; color: var(--danger);">Failed to load backups.</div>';
         }
+    }
 
-        // Click to close on background
-        modal.onclick = (e) => {
-            if (e.target === modal) this.closeBackupsModal();
-        };
+    async showBackupsModal() {
+        this.openSettingsSection('settingsBackupsCard');
+        await this.renderBackupsList();
+        return;
     }
 
     closeBackupsModal() {
-        document.getElementById('backupsModal').classList.remove('active');
-        document.getElementById('backupsModal').style.pointerEvents = 'none';
+        return;
     }
 
     // --- Scraper Doctor ---
@@ -3173,7 +3715,8 @@ class App {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, selector })
             });
-            const data = await res.json();
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Test failed');
 
             results.style.display = 'block';
             if (data.success && data.price !== null && data.price !== undefined) {
@@ -3203,7 +3746,7 @@ class App {
                     suggestionsEl.innerHTML = `
                         <div style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem;">Suggested Selectors</div>
                         <div style="display:flex; flex-wrap:wrap; gap:0.5rem;">
-                            ${unique.map(sel => `<button type="button" class="icon-btn" data-sel="${sel.replace(/"/g, '&quot;')}" style="padding:0.35rem 0.6rem; font-size:0.75rem;">${sel}</button>`).join('')}
+                            ${unique.map(sel => `<button type="button" class="icon-btn" data-sel="${this.escapeHtml(sel)}" style="padding:0.35rem 0.6rem; font-size:0.75rem;">${this.escapeHtml(sel)}</button>`).join('')}
                         </div>
                     `;
                     suggestionsEl.querySelectorAll('button[data-sel]').forEach(el => {
@@ -3242,60 +3785,84 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/items/${item.id}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, url, selector })
+                body: JSON.stringify({ name, url, selector, revision: this.itemsRevision })
             });
+            const data = await res.json().catch(() => ({}));
 
             if (res.ok) {
-                const data = await res.json();
                 const idx = this.items.findIndex(i => i.id === item.id);
-                this.items[idx] = data.item;
+                this.items[idx] = this.normalizeServerItems([data.item])[0] || data.item;
+                const revision = Number(data.revision);
+                if (Number.isFinite(revision)) this.itemsRevision = revision;
 
                 this.showToast('Selector updated!', 'success');
                 this.logAction('item.edited', { itemId: item.id, name, url });
                 this.closeDoctorModal();
                 this.render();
+                return;
             }
+            if (res.status === 409 && Array.isArray(data.items)) {
+                this.applyServerItemsPayload(data, data.items);
+                this.render();
+            }
+            throw new Error(data.error || 'Failed to update selector');
         } catch (e) {
-            this.showToast('Failed to update selector', 'error');
+            this.showToast(e.message || 'Failed to update selector', 'error');
         }
     }
 
     async restoreFromBackup(filename) {
         let previewText = '';
+        let requiresPassword = false;
+        let unsupported = false;
+        let corrupt = false;
         try {
             const previewRes = await fetch(`${this.SERVER_URL}/backups/preview?filename=${encodeURIComponent(filename)}`);
-            if (previewRes.ok) {
-                const previewData = await previewRes.json();
-                const p = previewData.preview || {};
-                previewText = `\nItems: ${p.itemCount ?? 'n/a'} | Lists: ${p.listCount ?? 'n/a'} | Purchased: ${p.purchasedCount ?? 'n/a'} | Audit: ${p.auditCount ?? 'n/a'} | Diagnostics: ${p.diagnosticsCount ?? 'n/a'} | Range: ${p.rangeStart ? this.formatDate(p.rangeStart) : '-'} -> ${p.rangeEnd ? this.formatDate(p.rangeEnd) : '-'}`;
+            const previewData = await previewRes.json().catch(() => ({}));
+            if (!previewRes.ok) {
+                throw new Error(previewData.error || 'Backup preview failed');
             }
-        } catch { }
-        if (!confirm(`Are you sure you want to restore from ${filename}? This will overwrite your current prices and history.${previewText}`)) return;
+            const p = previewData.preview || {};
+            requiresPassword = Boolean(previewData.encrypted || p.encrypted);
+            unsupported = Boolean(p.unsupported);
+            corrupt = Boolean(p.corrupt);
+            previewText = `\n${this.formatBackupPreview(p)}`;
+        } catch (error) {
+            this.showToast(error.message || 'Backup preview failed', 'error');
+            return;
+        }
+        if (corrupt) {
+            this.showToast('This backup file is unreadable and cannot be restored', 'error');
+            return;
+        }
+        if (unsupported) {
+            this.showToast('Only encrypted backups are supported', 'error');
+            return;
+        }
+        if (!confirm(`Restore ${filename}? This will overwrite your current items, lists, alert rules, history, diagnostics, audit log, and notification webhooks.${previewText}`)) return;
+
+        let password = '';
+        if (requiresPassword) {
+            password = prompt(`Enter the backup password for ${filename}:`) || '';
+            if (!password) {
+                this.showToast('Backup password is required', 'error');
+                return;
+            }
+        }
 
         try {
             const response = await fetch(`${this.SERVER_URL}/backups/restore`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename })
+                body: JSON.stringify({ filename, password })
             });
-            const result = await response.json();
-            if (result.success) {
-                this.showToast("Backup restored successfully!");
-                await Promise.all([
-                    this.loadFromServer(),
-                    this.loadSettings(),
-                    this.loadLists(),
-                    this.loadAlertRules()
-                ]);
-                this.renderListControls();
-                this.fillAlertRulesForm();
-                this.syncCheckIntervalUI();
-                this.render();
-                this.closeBackupsModal();
-                this.logAction('backup.restored', { filename });
-            } else {
-                throw new Error(result.error);
-            }
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || 'Restore failed');
+
+            await this.refreshAfterBackupMutation();
+            this.showToast("Backup restored successfully!");
+            this.closeBackupsModal();
+            this.logAction('backup.restored', { filename, encrypted: true });
         } catch (e) {
             this.showToast(`Restore failed: ${e.message}`, 'error');
         }
@@ -3303,8 +3870,8 @@ class App {
 
     toggleItemMenu(event, id) {
         event.stopPropagation();
-        const menu = document.getElementById(`menu-${id}`);
-        const row = document.querySelector(`.list-item[data-id="${id}"]`);
+        const menu = document.getElementById(this.getDomSafeId(id, 'menu-'));
+        const row = document.querySelector(`.list-item[data-dom-id="${this.getDomSafeId(id, 'item-')}"]`);
         // Close all other item menus
         document.querySelectorAll('.actions-menu').forEach(m => {
             if (m !== menu) m.classList.remove('active');
@@ -3328,6 +3895,15 @@ class App {
         if (!menu) return;
         const anchor = menu.parentElement;
         if (!anchor) return;
+
+        if (window.innerWidth <= 768) {
+            menu.style.top = '';
+            menu.style.right = '';
+            menu.style.left = '';
+            menu.style.maxHeight = '';
+            menu.style.overflowY = '';
+            return;
+        }
 
         const viewportPadding = 12;
         const gap = 5;

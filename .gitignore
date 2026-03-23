@@ -1,2 +1,8 @@
 .env
 server/.env
+data/
+prices.json
+settings.json
+audit.json
+diagnostics.json
+backups/

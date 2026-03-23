@@ -55,6 +55,7 @@ The following environment variables can be set in the `.env` file:
 | `DISCORD_PROXY_BASE` | Optional proxy base for Discord webhooks | - |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token | - |
 | `TELEGRAM_CHAT_ID` | Telegram Chat ID | - |
+| `DATA_DIR` | Optional runtime data directory. If unset, Centsible stores runtime state in `./data/`. The provided Docker Compose file sets this to `/app/data`. | `./data` |
 | `ALLOWED_ORIGINS` | CORS allowed origins (comma-separated). Leave empty to allow all origins. | empty |
 | `FETCH_ALLOWED_HOSTS` | Whitelisted hostnames for tracking | - |
 
@@ -73,14 +74,16 @@ If the automated extractor fails on a specific site, use the **Extractor Lab** t
 
 ## Backup and Portability
 
-Runtime state is stored in local JSON files:
+Runtime state is stored in local JSON files under the runtime data directory:
 
 - `prices.json` (tracked items + history)
 - `settings.json` (lists, alert rules, interval, notification settings)
 - `diagnostics.json`
 - `audit.json`
 
-Scheduled backups are saved to the `backups/` directory.
+Scheduled backups are saved to the `backups/` directory under that same data root.
+
+By default, manual runs also use `./data/`. For Docker deployments, those files live under `./data/` on the host because Docker mounts that directory into `/app/data`.
 
 Current backup format is a full-state snapshot containing:
 
@@ -89,7 +92,7 @@ Current backup format is a full-state snapshot containing:
 - `diagnostics`
 - `audit`
 
-In-app restore supports both full-state snapshots and legacy item-only backups.
+In-app import and restore support only encrypted full-state backups created after a backup password is configured.
 
 ## License
 

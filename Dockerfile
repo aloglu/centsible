@@ -26,10 +26,10 @@ RUN cd server && npm ci --omit=dev && npm cache clean --force
 # Copy application code
 COPY . .
 
-# Ensure writable data paths (useful for Unraid bind mounts)
-RUN touch prices.json settings.json && \
-    mkdir -p backups && \
-    chmod -R 777 prices.json settings.json backups
+# Ensure writable data paths (useful for bind mounts)
+RUN mkdir -p /app/data/backups && \
+    touch /app/data/prices.json /app/data/settings.json /app/data/diagnostics.json /app/data/audit.json && \
+    chmod -R 777 /app/data
 
 EXPOSE 3000
 # Start only the backend; static frontend is served by Express.
