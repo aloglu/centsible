@@ -1,5 +1,5 @@
 # Multi-arch base image (amd64/arm64)
-FROM node:20-bookworm-slim
+FROM node:24-bookworm-slim
 
 # Runtime environment
 ENV NODE_ENV=production
