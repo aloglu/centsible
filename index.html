@@ -150,6 +150,10 @@
                     Add Item
                 </button>
             </div>
+<details class="price-options"><summary>Currency &amp; number format (optional)</summary>
+ <div class="price-options-fields"><label for="addCurrencyOverride">Currency<select id="addCurrencyOverride"><option value="">Detect from page</option><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="TRY">TRY</option><option value="JPY">JPY</option><option value="CAD">CAD</option><option value="AUD">AUD</option><option value="CHF">CHF</option><option value="CNY">CNY</option><option value="SEK">SEK</option><option value="NOK">NOK</option><option value="DKK">DKK</option><option value="PLN">PLN</option><option value="CZK">CZK</option><option value="HUF">HUF</option><option value="RON">RON</option></select></label>
+ <label for="addPriceLocale">Number format<select id="addPriceLocale"><option value="">Automatic</option><option value="tr-TR">Turkish · 1.234,56</option><option value="de-DE">German · 1.234,56</option><option value="en-GB">British · 1,234.56</option><option value="en-US">American · 1,234.56</option><option value="fr-FR">French · 1 234,56</option><option value="de-CH">Swiss · 1’234.56</option><option value="ja-JP">Japanese · 1,234.56</option><option value="zh-CN">Chinese · 1,234.56</option></select></label></div>
+ <p>Use these if the page leaves the currency unclear or uses an ambiguous number format. Target prices use the item's currency. An override cannot change the currency of existing history.</p></details>
             <div class="grid" id="productGrid">
                 <!-- Items will be injected here -->
             </div>
@@ -301,11 +305,21 @@
                     <input type="text" id="labSelectorInput" placeholder="Optional selector (e.g. .price)" title="Optional CSS selector to force a specific price element.">
                     <button class="primary" id="labRunBtn" onclick="app.runExtractorLab()" title="Run extraction diagnostics for this URL.">Run Extraction</button>
                 </div>
+<details class="price-options"><summary>Currency &amp; number format (optional)</summary>
+ <div class="price-options-fields"><label for="labCurrencyOverride">Currency<select id="labCurrencyOverride"><option value="">Detect from page</option><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="TRY">TRY</option><option value="JPY">JPY</option><option value="CAD">CAD</option><option value="AUD">AUD</option><option value="CHF">CHF</option><option value="CNY">CNY</option><option value="SEK">SEK</option><option value="NOK">NOK</option><option value="DKK">DKK</option><option value="PLN">PLN</option><option value="CZK">CZK</option><option value="HUF">HUF</option><option value="RON">RON</option></select></label>
+ <label for="labPriceLocale">Number format<select id="labPriceLocale"><option value="">Automatic</option><option value="tr-TR">Turkish · 1.234,56</option><option value="de-DE">German · 1.234,56</option><option value="en-GB">British · 1,234.56</option><option value="en-US">American · 1,234.56</option><option value="fr-FR">French · 1 234,56</option><option value="de-CH">Swiss · 1’234.56</option><option value="ja-JP">Japanese · 1,234.56</option><option value="zh-CN">Chinese · 1,234.56</option></select></label></div>
+ <p>Use these if the page leaves the currency unclear or uses an ambiguous number format. Target prices use the item's currency. An override cannot change the currency of existing history.</p></details>
                 <div id="labResult" class="lab-result"></div>
             </div>
         </div>
 
         <div id="auditPanel" class="dashboard-panel">
+            <div class="panel-card" style="margin-bottom: 0.8rem;">
+                <div class="panel-head"><h2>System Health &amp; Deliveries</h2>
+                    <button class="secondary" onclick="app.renderHealthPanel()">Refresh status</button></div>
+                <div id="healthSummary" role="status">Loading health status…</div>
+                <details><summary>Recent notification deliveries</summary><div id="deliveryHistory"></div></details>
+            </div>
             <div class="panel-card system-activity-section" id="systemSectionQueue" style="margin-bottom: 0.8rem;">
                 <div class="panel-head">
                     <div class="panel-head-copy">
@@ -485,6 +499,10 @@
                         </div>
                     </div>
 
+<details class="price-options"><summary>Currency &amp; number format (optional)</summary>
+ <div class="price-options-fields"><label for="doctorCurrencyOverride">Currency<select id="doctorCurrencyOverride"><option value="">Detect from page</option><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="TRY">TRY</option><option value="JPY">JPY</option><option value="CAD">CAD</option><option value="AUD">AUD</option><option value="CHF">CHF</option><option value="CNY">CNY</option><option value="SEK">SEK</option><option value="NOK">NOK</option><option value="DKK">DKK</option><option value="PLN">PLN</option><option value="CZK">CZK</option><option value="HUF">HUF</option><option value="RON">RON</option></select></label>
+ <label for="doctorPriceLocale">Number format<select id="doctorPriceLocale"><option value="">Automatic</option><option value="tr-TR">Turkish · 1.234,56</option><option value="de-DE">German · 1.234,56</option><option value="en-GB">British · 1,234.56</option><option value="en-US">American · 1,234.56</option><option value="fr-FR">French · 1 234,56</option><option value="de-CH">Swiss · 1’234.56</option><option value="ja-JP">Japanese · 1,234.56</option><option value="zh-CN">Chinese · 1,234.56</option></select></label></div>
+ <p>Use these if the page leaves the currency unclear or uses an ambiguous number format. Target prices use the item's currency. An override cannot change the currency of existing history.</p></details>
                     <div id="doctorResults"
                         style="margin-top: 1.5rem; padding: 1rem; background: rgba(0,0,0,0.2); border-radius: 0.5rem; display: none;">
                         <div style="font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted);">Test Result

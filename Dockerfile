@@ -26,10 +26,8 @@ RUN cd server && npm ci --omit=dev && npm cache clean --force
 # Copy application code
 COPY . .
 
-# Ensure writable data paths (useful for bind mounts)
-RUN mkdir -p /app/data/backups && \
-    touch /app/data/prices.json /app/data/settings.json /app/data/diagnostics.json /app/data/audit.json && \
-    chmod -R 777 /app/data
+# State lives entirely in the mounted data directory.
+RUN mkdir -p /app/data/backups
 
 EXPOSE 3000
 # Start only the backend; static frontend is served by Express.

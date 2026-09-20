@@ -63,230 +63,6 @@ class Sparkline {
     }
 }
 
-/**
- * Price Scraper Logic
- * Uses CORS proxy to fetch HTML and Regex/DOM parsing to find prices.
- */
-class Scraper {
-    static PROXIES = [
-        {
-            // JSON response { contents: string }
-            url: 'https://api.allorigins.win/get?url=',
-            type: 'json'
-        },
-        {
-            // Raw text response
-            url: 'https://api.codetabs.com/v1/proxy?quest=',
-            type: 'text'
-        },
-        {
-            // Raw text response
-            url: 'https://thingproxy.freeboard.io/fetch/',
-            type: 'text'
-        }
-    ];
-
-    static async fetchPrice(targetUrl, customSelector = null) {
-        // Prefer backend extraction for consistency with background checks.
-        try {
-            const res = await fetch(`${window.location.origin}/api/extract`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: targetUrl, selector: customSelector || null })
-            });
-            if (res.ok) {
-                const data = await res.json();
-                if (data && data.price !== null && data.price !== undefined) {
-                    return Number(data.price);
-                }
-            }
-        } catch (e) {
-            console.warn('Backend extract failed, trying proxy fallback:', e);
-        }
-
-        const encoded = encodeURIComponent(targetUrl);
-        const proxies = [
-            {
-                url: `${window.location.origin}/api/fetch?url=`,
-                type: 'text'
-            },
-            ...Scraper.PROXIES
-        ];
-
-        for (const proxy of proxies) {
-            try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout per proxy
-
-                const response = await fetch(`${proxy.url}${encoded}`, {
-                    signal: controller.signal
-                });
-                clearTimeout(timeoutId);
-
-                if (!response.ok) throw new Error(`Status ${response.status}`);
-
-                let html = '';
-                if (proxy.type === 'json') {
-                    const data = await response.json();
-                    if (!data.contents) throw new Error("No content");
-                    html = data.contents;
-                } else {
-                    html = await response.text();
-                }
-
-                if (!html || html.length < 100) throw new Error("Content too short");
-
-                const price = Scraper.parseHtml(html, customSelector);
-
-                return price;
-
-            } catch (e) {
-                console.warn(`Proxy ${proxy.url} failed:`, e);
-            }
-        }
-        return null;
-    }
-
-    static parseHtml(htmlString, customSelector = null) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlString, 'text/html');
-
-        // 0. Try Custom Selector/ID if provided
-        if (customSelector) {
-            // Try exact match (ID)
-            let el = doc.getElementById(customSelector);
-            // Try as query selector (class, id, attr)
-            if (!el) {
-                try { el = doc.querySelector(customSelector); } catch (e) { }
-            }
-            // Try as data-test-id (specifically requested by user)
-            if (!el) {
-                try { el = doc.querySelector(`[data-test-id="${customSelector}"]`); } catch (e) { }
-            }
-            // Try as class
-            if (!el) {
-                try { el = doc.querySelector(`.${customSelector}`); } catch (e) { }
-            }
-
-            if (el) {
-                const price = Scraper.extractPrice(el.textContent || el.getAttribute('content'));
-                if (price) return price;
-            }
-        }
-
-        // 1. Try Meta Tags (Og, Schema)
-        const selectors = [
-            'meta[property="og:price:amount"]',
-            'meta[itemprop="price"]',
-            'meta[property="product:price:amount"]',
-            'meta[name="twitter:data1"]',
-            '.a-price .a-offscreen', // Amazon hidden
-            '#priceblock_ourprice',
-            '#priceblock_dealprice',
-            '.price',
-            '.product-price',
-            '.prc-dsc',
-            '.fiyat',
-            '.new-price',
-            '.current-price',
-            '.product-price-wrapper',
-            '.satis_fiyati',
-            '.indirimli_fiyat',
-            '.discount_price',
-            '.card-price-last',
-            '.card-price',
-            '[data-test-id="price"]',
-            '[data-testid="price-container"]'
-        ];
-
-        for (let sel of selectors) {
-            const el = doc.querySelector(sel);
-            if (el) {
-                const content = el.getAttribute('content') || el.innerText;
-                const price = Scraper.extractPrice(content);
-                if (price) return price;
-            }
-        }
-
-        // 2. Fallback: Regex on body (Risky but sometimes works)
-        // Look for currency symbols followed by numbers
-        // This is a naive implementation, meant as a last resort
-        const bodyText = doc.body.innerText;
-        // Search for patterns like $10.99 or £20.00 near "price"
-        // Skipping for now to avoid false positives
-
-        return null;
-    }
-
-    static extractPrice(text) {
-        if (!text) return null;
-        text = text.trim();
-
-        // Detect Turkish context (using ₺, TL, TRY or "TL" suffix)
-        const isTurkish = /tl|try|₺/i.test(text);
-
-        // Find a potential number pattern
-        const match = text.match(/([0-9]{1,3}([.,][0-9]{3})*[.,][0-9]+)|([0-9]+[.,][0-9]+)|([0-9]+)/);
-
-        if (!match) return null;
-        let rawNum = match[0];
-
-        if (isTurkish) {
-            // Turkish format check: 1.234,56 (dot=thousand, comma=decimal)
-            // But also handle US style if forced (e.g. TRY 1,234.56)
-            if (rawNum.includes(',') && rawNum.includes('.')) {
-                const lastDot = rawNum.lastIndexOf('.');
-                const lastComma = rawNum.lastIndexOf(',');
-                if (lastComma > lastDot) {
-                    // 1.234,56 -> Standard Turkish/Euro
-                    rawNum = rawNum.replace(/\./g, '').replace(',', '.');
-                } else {
-                    // 1,234.56 -> US Style
-                    rawNum = rawNum.replace(/,/g, '');
-                }
-            } else if (rawNum.includes(',')) {
-                // 123,45 or 1234,50 -> Decimal
-                // Or 1,234 -> Could be 1234 or 1.234
-                // In TR context, comma is standard decimal.
-                rawNum = rawNum.replace(',', '.');
-            } else if (rawNum.includes('.')) {
-                // 1.234 -> Could be 1234 (thousands) or 1.234 (decimal)
-                // In TR context, dot is thousands.
-                // Check if it looks like thousands (3 digits after dot)
-                const parts = rawNum.split('.');
-                if (parts[parts.length - 1].length === 3) {
-                    // 1.234 -> 1234
-                    rawNum = rawNum.replace(/\./g, '');
-                }
-                // else leave it (12.50) -> 12.50
-            }
-        } else {
-            // General/US context
-            if (rawNum.includes(',') && rawNum.includes('.')) {
-                const lastDot = rawNum.lastIndexOf('.');
-                const lastComma = rawNum.lastIndexOf(',');
-                if (lastComma > lastDot) {
-                    rawNum = rawNum.replace(/\./g, '').replace(',', '.');
-                } else {
-                    rawNum = rawNum.replace(/,/g, '');
-                }
-            } else if (rawNum.includes(',')) {
-                // 1,234 or 12,34
-                if (/,[0-9]{2}$/.test(rawNum)) {
-                    rawNum = rawNum.replace(',', '.');
-                } else {
-                    rawNum = rawNum.replace(/,/g, '');
-                }
-            }
-        }
-
-        return parseFloat(rawNum);
-    }
-}
-
-/**
- * Main Application
- */
 class App {
     constructor() {
         // Primary client-side state. Replaced/updated from backend on polling and user actions.
@@ -527,20 +303,7 @@ class App {
     }
 
     getCurrency(item) {
-        if (item.currency) return item.currency;
-        // Infer from URL
-        try {
-            const u = new URL(item.url);
-            const h = u.hostname;
-            if (h.endsWith('.tr')) return 'TRY';
-            if (h.includes('korayspor') || h.includes('hepsiburada') || h.includes('trendyol') || h.includes('n11') || h.includes('boyner')) return 'TRY';
-            if (h.includes('amazon.de')) return 'EUR';
-            if (h.includes('amazon.co.uk')) return 'GBP';
-            if (h.includes('amazon.jp')) return 'JPY';
-            return 'USD'; // Default for .com and others
-        } catch {
-            return 'USD';
-        }
+        return item.currency || item.currencyOverride || null;
     }
 
     getNormalizedPrice(item) {
@@ -553,11 +316,12 @@ class App {
 
         // Fallback if backend did not compute normalized value.
         const rate = this.exchangeRates[currency];
-        return rate ? (price / rate) : price;
+        return rate ? (price / rate) : 0;
     }
 
     formatPrice(price, currency) {
         if (typeof price !== 'number') return '-';
+        if (!currency) return `${price.toFixed(2)} (currency unknown)`;
         try {
             return price.toLocaleString(currency === 'TRY' ? 'tr-TR' : 'en-US', {
                 style: 'currency',
@@ -758,8 +522,7 @@ class App {
                 stockReason: item.stockReason || '',
                 stockConfidence: this.normalizeConfidence(item.stockConfidence),
                 stockSource: item.stockSource || null
-            }))
-            .filter(item => !this.isLegacyDemoItem(item));
+            }));
     }
 
     normalizeNullableNumber(value) {
@@ -881,24 +644,6 @@ class App {
             this.updateStatusUI({ active: false });
             return false;
         }
-    }
-
-    isLegacyDemoItem(item) {
-        if (!item) return false;
-        const id = String(item.id || '').toLowerCase();
-        const name = String(item.name || '').toLowerCase();
-        const url = String(item.url || '').toLowerCase();
-        return (
-            id === 'demo1' ||
-            id === 'demo2' ||
-            id === 'demo3' ||
-            name.includes('sony wh-1000xm5 wireless headphones') ||
-            name.includes('macbook air m2 15-inch') ||
-            name.includes('logitech mx master 3s') ||
-            url.includes('/demo1') ||
-            url.includes('/demo2') ||
-            url.includes('/demo3')
-        );
     }
 
     async updateServerStatus() {
@@ -1737,6 +1482,7 @@ class App {
     }
 
     async renderDiagnosticsPanel() {
+        this.renderHealthPanel();
         const container = document.getElementById('diagnosticsList');
         if (!container) return;
         try {
@@ -1762,6 +1508,40 @@ class App {
         } catch (e) {
             container.innerHTML = `<div class="diag-row fail">${this.escapeHtml(`Failed to load diagnostics: ${e.message}`)}</div>`;
         }
+    }
+
+    async renderHealthPanel() {
+        const container = document.getElementById('healthSummary');
+        const deliveries = document.getElementById('deliveryHistory');
+        if (!container || !deliveries) return;
+        try {
+            const response = await fetch(`${this.SERVER_URL}/health`);
+            if (!response.ok) throw new Error('Health status unavailable');
+            const health = await response.json();
+            const format = value => value ? new Date(value).toLocaleString() : 'Not yet';
+            const messages = [
+                `Last completed scan: ${format(health.lastCheckCompleted)}${health.checking ? ' · Checking now' : ''}`,
+                `${health.failingItems} failed checks · ${health.staleItems} stale items`,
+                `${health.pendingNotifications} queued alerts · ${health.failedNotifications} awaiting delivery retry`,
+                health.channels.length ? `Destinations: ${health.channels.join(', ')}` : 'No notification destination configured',
+                !health.backup.configured ? 'Automatic backups need a password in Settings' : !health.backup.unlocked ? 'Automatic backups are locked. Unlock in Settings or configure BACKUP_PASSWORD for unattended restarts.' : `Last automatic backup: ${format(health.backup.lastSuccess)}`
+            ];
+            if (health.overdue) messages.unshift('Scheduled checks are overdue. Check the server logs.');
+            if (health.backup.error) messages.push(`Backup: ${health.backup.error}`);
+            container.replaceChildren(...messages.map(message => {
+                const row = document.createElement('p'); row.textContent = message; return row;
+            }));
+            deliveries.replaceChildren(...health.deliveries.map(event => {
+                const row = document.createElement('div'); row.className = 'diag-row';
+                const title = document.createElement('div'); title.textContent = `${event.title} · ${format(event.createdAt)}`;
+                const detail = document.createElement('div'); detail.className = 'diag-meta';
+                detail.textContent = Object.entries(event.channels).map(([channel, state]) => state.deliveredAt
+                    ? `${channel}: delivered ${format(state.deliveredAt)}`
+                    : `${channel}: ${state.error || 'queued'} · ${state.attempts} attempts · retry ${format(state.nextAttempt)}`).join(' | ');
+                row.append(title, detail); return row;
+            }));
+            if (!health.deliveries.length) deliveries.textContent = 'No alert deliveries yet.';
+        } catch (error) { container.textContent = error.message; }
     }
 
     async clearDiagnostics() {
@@ -1833,44 +1613,33 @@ class App {
         });
     }
 
-    async scrapePrice(url, selector) {
-        try {
-            const response = await fetch(`${this.SERVER_URL}/extract`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, selector: selector || null })
-            });
-            if (!response.ok) throw new Error("Extraction failed");
-            const data = await response.json();
+    readPriceOptions(prefix) {
+        return {
+            currencyOverride: document.getElementById(`${prefix}CurrencyOverride`)?.value || null,
+            priceLocale: document.getElementById(`${prefix}PriceLocale`)?.value || null
+        };
+    }
 
-            if (data && data.success) {
-                const title = data.title ? String(data.title).trim() : null;
-                const availability = data.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
-                return {
-                    price: data.price !== null && data.price !== undefined ? Number(data.price) : null,
-                    title: title && title.length > 70 ? title.substring(0, 67) + '...' : title,
-                    currency: data.currency || this.getCurrency({ url }),
-                    confidence: data.confidence || 0,
-                    source: data.source || null,
-                    selectorUsed: data.selectorUsed || null,
-                    suggestions: data.suggestions || [],
-                    availability
-                };
+    setPriceOptions(prefix, item = {}) {
+        for (const [suffix, value] of [['CurrencyOverride', item.currencyOverride], ['PriceLocale', item.priceLocale]]) {
+            const input = document.getElementById(`${prefix}${suffix}`);
+            if (input) {
+                if (value && !Array.from(input.options).some(option => option.value === value)) input.add(new Option(value, value));
+                input.value = value || '';
             }
-        } catch (e) {
-            console.warn("Backend extraction failed, falling back to basic check:", e);
-            const price = await Scraper.fetchPrice(url, selector);
-            return {
-                price,
-                title: null,
-                currency: this.getCurrency({ url }),
-                confidence: 0,
-                source: null,
-                selectorUsed: null,
-                suggestions: [],
-                availability: { status: 'unknown', confidence: 0, reason: '', source: null }
-            };
         }
+    }
+
+    async scrapePrice(url, selector, options = {}) {
+        const response = await fetch(`${this.SERVER_URL}/extract`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, selector: selector || null, currencyOverride: options.currencyOverride, priceLocale: options.priceLocale })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success || data.rejection) throw Object.assign(new Error(data.error || data.rejection || 'Extraction failed'), { code: data.code, retryAt: data.retryAt });
+        if (data.price !== null && Number(data.confidence || 0) < 65) throw new Error('No sufficiently reliable price found. Try Extractor Lab.');
+        if (data.price === null && Number(data.availability?.confidence || 0) < 80) throw new Error('Price and stock status could not be confirmed.');
+        return { ...data, title: data.title ? String(data.title).slice(0, 180) : null };
     }
 
     setupInputs() {
@@ -2184,7 +1953,8 @@ class App {
             }
 
             // Initial Scrape
-            const initialData = await this.scrapePrice(url, null);
+            const priceOptions = this.readPriceOptions('add');
+            const initialData = await this.scrapePrice(url, null, priceOptions);
             const initialAvailability = initialData?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
             const isInitialOutOfStock = initialAvailability.status === 'out_of_stock';
             if (!initialData || (initialData.price === null && !isInitialOutOfStock)) {
@@ -2195,7 +1965,9 @@ class App {
             const newItem = {
                 url,
                 canonicalUrl,
-                selector: initialData.selectorUsed || null,
+                selector: null,
+                ...priceOptions,
+                lastSelectorUsed: initialData.selectorUsed || null,
                 name: name || initialData.title || new URL(url).hostname,
                 listId: selectedListId || this.newItemListId || (this.lists[0] && this.lists[0].id) || 'default',
                 purchased: false,
@@ -2238,6 +2010,7 @@ class App {
             urlInp.value = '';
             nameInp.value = '';
             if (targetInp) targetInp.value = '';
+            this.setPriceOptions('add');
             this.pendingAddItemListId = null;
             this.renderAddItemListSelect();
 
@@ -2344,7 +2117,7 @@ class App {
             const previousStockStatus = String(item.stockStatus || 'unknown');
 
             try {
-                extracted = await this.scrapePrice(item.url, item.selector);
+                extracted = await this.scrapePrice(item.url, item.selector, item);
                 const availability = extracted?.availability || { status: 'unknown', confidence: 0, reason: '', source: null };
                 price = extracted ? extracted.price : null;
                 stockStatus = availability.status || (price !== null ? 'in_stock' : 'unknown');
@@ -2362,7 +2135,11 @@ class App {
                             revision: this.itemsRevision,
                             expectedUrl: item.url,
                             expectedSelector: item.selector || null,
-                            error: scrapeError.message || 'Check failed'
+                            expectedCurrencyOverride: item.currencyOverride || null,
+                            expectedPriceLocale: item.priceLocale || null,
+                            error: scrapeError.message || 'Check failed',
+                            errorCode: scrapeError.code,
+                            retryAt: scrapeError.retryAt
                         })
                     }, 'Failed to persist failed check result');
                 } catch (persistError) {
@@ -2371,7 +2148,7 @@ class App {
                     return;
                 }
                 this.render();
-                this.showToast(`Failed to update ${item.name}`, "error");
+                this.showToast(scrapeError.message || `Failed to update ${item.name}`, "error");
                 return;
             }
 
@@ -2383,7 +2160,9 @@ class App {
                         revision: this.itemsRevision,
                         expectedUrl: item.url,
                         expectedSelector: item.selector || null,
-                        extraction
+                            expectedCurrencyOverride: item.currencyOverride || null,
+                            expectedPriceLocale: item.priceLocale || null,
+                        extraction: extracted
                     })
                 }, 'Failed to persist refresh result');
             } catch (persistError) {
@@ -2392,6 +2171,12 @@ class App {
                 return;
             }
 
+            const checkedItem = this.items.find(candidate => candidate.id === id);
+            if (checkedItem?.lastCheckStatus === 'fail') {
+                this.render();
+                this.showToast(checkedItem.lastCheckError || 'Check needs attention', 'error');
+                return;
+            }
             this.markItemCheckFlash(id, 10000);
             this.render();
 
@@ -2553,6 +2338,10 @@ class App {
 
     escapeJsString(value) {
         return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
             .replace(/\\/g, '\\\\')
             .replace(/'/g, "\\'")
             .replace(/\r/g, '\\r')
@@ -2872,7 +2661,7 @@ class App {
                 pushAlert({
                     severity: 'critical',
                     title: `${item.name}: target hit`,
-                    meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(item.currentPrice, item.currency || 'USD')}`,
+                    meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(item.currentPrice, this.getCurrency(item))}`,
                     id: item.id,
                     time: alertTime
                 });
@@ -2906,12 +2695,12 @@ class App {
             }
             if (rules.allTimeLowEnabled && Array.isArray(item.history) && item.history.length > 2) {
                 const prices = item.history.map(h => Number(h.price)).filter(Number.isFinite);
-                const min = Math.min(...prices);
+                const min = prices.reduce((a, b) => Math.min(a, b), Infinity);
                 if (Number(item.currentPrice) <= min) {
                     pushAlert({
                         severity: 'info',
                         title: `${item.name}: at all-time low`,
-                        meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(Number(item.currentPrice), item.currency || 'USD')}`,
+                        meta: `${alertTime ? new Date(alertTime).toLocaleString() : 'n/a'} | ${listName} | ${this.formatPrice(Number(item.currentPrice), this.getCurrency(item))}`,
                         id: item.id,
                         time: alertTime
                     });
@@ -2920,7 +2709,7 @@ class App {
         });
 
         if (!alerts.length) {
-            list.innerHTML = '<div class="alert-row ok">No active alerts. System looks healthy.</div>';
+            list.innerHTML = '<div class="alert-row ok">No active item alerts. Check System Health above for delivery and backup status.</div>';
             return;
         }
         const priority = { critical: 0, warning: 1, info: 2 };
@@ -2991,10 +2780,10 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/extract`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, selector: selector || null })
+                body: JSON.stringify({ url, selector: selector || null, ...this.readPriceOptions('lab') })
             });
             const data = await res.json();
-            if (!res.ok || !data.success) throw new Error(data.error || 'Extraction failed');
+            if (!res.ok || !data.success || data.rejection) throw new Error(data.error || data.rejection || 'Extraction failed');
             const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
             const suggestionButtons = suggestions
                 .map(s => s.selector)
@@ -3006,7 +2795,7 @@ class App {
             if (resultEl) {
                 resultEl.innerHTML = `
                     <div class="lab-grid">
-                        <div><span class="lab-label">Price:</span> ${data.price !== null && data.price !== undefined ? this.formatPrice(Number(data.price), data.currency || 'USD') : 'Not found'}</div>
+                        <div><span class="lab-label">Price:</span> ${data.price !== null && data.price !== undefined ? this.formatPrice(Number(data.price), data.currency) : 'Not found'}</div>
                         <div><span class="lab-label">Currency:</span> ${this.escapeHtml(data.currency || 'n/a')}</div>
                         <div><span class="lab-label">Confidence:</span> ${this.formatConfidence(data.confidence)}</div>
                         <div><span class="lab-label">Source:</span> ${this.escapeHtml(data.source || 'n/a')}</div>
@@ -3315,7 +3104,7 @@ class App {
         const closeBtn = modal.querySelector('.modal-close-button');
         const overlay = modal.querySelector('.modal-overlay');
 
-        // We use a bound function so we can remove it later if needed, 
+        // We use a bound function so we can remove it later if needed,
         // but for now simple onclick override is fine as we are single-instance.
         closeBtn.onclick = () => this.closeHistoryModal();
         overlay.onclick = () => this.closeHistoryModal();
@@ -3384,7 +3173,7 @@ class App {
 
             const tooltip = svg.parentNode.querySelector('.chart-tooltip');
             if (tooltip) {
-                tooltip.innerHTML = `<strong>${this.escapeHtml(this.formatPrice(nearest.price, currency || 'USD'))}</strong><br>${this.escapeHtml(this.formatDate(nearest.date))}`;
+                tooltip.innerHTML = `<strong>${this.escapeHtml(this.formatPrice(nearest.price, currency))}</strong><br>${this.escapeHtml(this.formatDate(nearest.date))}`;
                 tooltip.style.display = 'block';
 
                 // Calculate offset relative to the container (accounting for padding)
@@ -3676,6 +3465,7 @@ class App {
         if (nameInput) nameInput.value = item.name || '';
         if (urlInput) urlInput.value = item.url || '';
         if (input) input.value = item.selector || '';
+        this.setPriceOptions('doctor', item);
         if (results) results.style.display = 'none';
         if (metaVal) metaVal.textContent = '';
         if (suggestions) suggestions.innerHTML = '';
@@ -3713,7 +3503,7 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/test-selector`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, selector })
+                body: JSON.stringify({ url, selector, ...this.readPriceOptions('doctor') })
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || 'Test failed');
@@ -3728,7 +3518,7 @@ class App {
                 const selectorUsed = data.selectorUsed ? ` | Used: ${data.selectorUsed}` : '';
                 if (metaVal) metaVal.textContent = `${confidence}${source}${selectorUsed}`;
             } else {
-                priceVal.textContent = 'No price found.';
+                priceVal.textContent = data.rejection || 'No price found.';
                 priceVal.style.color = 'var(--danger)';
                 if (metaVal) metaVal.textContent = '';
             }
@@ -3785,7 +3575,7 @@ class App {
             const res = await fetch(`${this.SERVER_URL}/items/${item.id}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, url, selector, revision: this.itemsRevision })
+                body: JSON.stringify({ name, url, selector, ...this.readPriceOptions('doctor'), revision: this.itemsRevision })
             });
             const data = await res.json().catch(() => ({}));
 
@@ -3795,7 +3585,7 @@ class App {
                 const revision = Number(data.revision);
                 if (Number.isFinite(revision)) this.itemsRevision = revision;
 
-                this.showToast('Selector updated!', 'success');
+                this.showToast('Item settings updated!', 'success');
                 this.logAction('item.edited', { itemId: item.id, name, url });
                 this.closeDoctorModal();
                 this.render();

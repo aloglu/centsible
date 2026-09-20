@@ -1,18 +1,30 @@
-version: '3.8'
-
 services:
   centsible:
-    # Build from local Dockerfile so code/config stay in one project.
     build: .
+    image: ${CENTSIBLE_IMAGE:-centsible:local}
     container_name: centsible
-    # Expose app UI/API on host port 3000.
+    init: true
     ports:
-      - "3000:3000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-3000}:3000"
     volumes:
-      # Persistent storage for prices, settings, diagnostics, audit history, and backups
       - ./data:/app/data
-    # Auto-start on daemon restart unless manually stopped.
     restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: 256mb
     environment:
-      - TZ=Europe/Istanbul # Set your timezone
-      - DATA_DIR=/app/data
+      TZ: ${TZ:-Europe/Istanbul}
+      DATA_DIR: /app/data
+      PORT: 3000
+      DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}
+      DISCORD_PROXY_BASE: ${DISCORD_PROXY_BASE:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      BACKUP_PASSWORD: ${BACKUP_PASSWORD:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      FETCH_ALLOWED_HOSTS: ${FETCH_ALLOWED_HOSTS:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

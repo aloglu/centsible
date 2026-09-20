@@ -1,20 +1,19 @@
-﻿const express = require('express');
+const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const fs = require('fs');
 const fsPromises = fs.promises;
 const path = require('path');
-const dns = require('dns').promises;
-const net = require('net');
+const { createValidator } = require('./lib/network');
 const crypto = require('crypto');
-const cheerio = require('cheerio');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const notifier = require('node-notifier'); // Notifications
+const { parseHtml, extractTitleFromHtml, assessExtraction } = require('./lib/extraction');
+const { BrowserFetcher } = require('./lib/browser');
+const { Store } = require('./lib/store');
+const { extractionOptions } = require('./lib/currency');
+const { deliver } = require('./lib/delivery');
+const { emptyRuntime, channelsFor, enqueue, prune, evaluateAlerts, evaluateHealth } = require('./lib/alerts');
 
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
-
-puppeteer.use(StealthPlugin());
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,16 +24,17 @@ const DEFAULT_DATA_ROOT = path.join(PROJECT_ROOT, 'data');
 const DATA_ROOT = process.env.DATA_DIR
     ? path.resolve(PROJECT_ROOT, process.env.DATA_DIR)
     : DEFAULT_DATA_ROOT;
-const DATA_FILE = path.join(DATA_ROOT, 'prices.json');
-const SETTINGS_FILE = path.join(DATA_ROOT, 'settings.json');
-const DIAGNOSTICS_FILE = path.join(DATA_ROOT, 'diagnostics.json');
-const AUDIT_FILE = path.join(DATA_ROOT, 'audit.json');
+const DATA_FILE = 'items';
+const SETTINGS_FILE = 'settings';
+const DIAGNOSTICS_FILE = 'diagnostics';
+const AUDIT_FILE = 'audit';
+const store = new Store(DATA_ROOT);
+let runtime = normalizeRuntime(store.get('runtime', null));
+const startedAt = Date.now();
 const BACKUP_DIR = path.join(DATA_ROOT, 'backups');
-const TRANSACTION_JOURNAL_FILE = path.join(DATA_ROOT, '.state-transaction.json');
-const LEGACY_TRANSACTION_JOURNAL_FILE = path.join(PROJECT_ROOT, '.state-transaction.json');
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
-const MAX_CHECK_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const MAX_CHECK_INTERVAL_MS = 24 * 24 * 60 * 60 * 1000; // Keep below the Node timer limit
 const BACKUP_PASSWORD_MIN_LENGTH = 8;
 const BACKUP_SCHEMA_PLAIN = 'centsible-backup-v3';
 const BACKUP_SCHEMA_ENCRYPTED = 'centsible-backup-v3-encrypted';
@@ -53,6 +53,7 @@ const FETCH_ALLOWED_HOSTS = (process.env.FETCH_ALLOWED_HOSTS || '')
     .split(',')
     .map(host => host.trim().toLowerCase())
     .filter(Boolean);
+const validateFetchUrl = createValidator(FETCH_ALLOWED_HOSTS);
 const TEST_FETCH_DELAY_MS = Math.max(0, Number(process.env.CENTSIBLE_TEST_FETCH_DELAY_MS || 0) || 0);
 const TEST_PATCH_DELAY_MS = Math.max(0, Number(process.env.CENTSIBLE_TEST_PATCH_DELAY_MS || 0) || 0);
 const TEST_FAKE_FETCH_HTML = typeof process.env.CENTSIBLE_TEST_FETCH_HTML === 'string'
@@ -65,54 +66,6 @@ function normalizeOrigin(origin) {
         return new URL(origin).origin.toLowerCase();
     } catch (_) {
         return String(origin).trim().replace(/\/+$/, '').toLowerCase();
-    }
-}
-
-function shouldMigrateLegacyProjectRootData() {
-    return path.resolve(DATA_ROOT) === path.resolve(DEFAULT_DATA_ROOT)
-        && path.resolve(DATA_ROOT) !== path.resolve(PROJECT_ROOT);
-}
-
-async function shouldCopyLegacyFile(legacyPath, targetPath) {
-    if (!fs.existsSync(legacyPath)) return false;
-    if (!fs.existsSync(targetPath)) return true;
-    const [legacyStat, targetStat] = await Promise.all([
-        fsPromises.stat(legacyPath),
-        fsPromises.stat(targetPath)
-    ]);
-    return legacyStat.mtimeMs > targetStat.mtimeMs;
-}
-
-async function migrateLegacyProjectRootData() {
-    if (!shouldMigrateLegacyProjectRootData()) return;
-
-    const fileMappings = [
-        { legacyPath: path.join(PROJECT_ROOT, 'prices.json'), targetPath: DATA_FILE },
-        { legacyPath: path.join(PROJECT_ROOT, 'settings.json'), targetPath: SETTINGS_FILE },
-        { legacyPath: path.join(PROJECT_ROOT, 'diagnostics.json'), targetPath: DIAGNOSTICS_FILE },
-        { legacyPath: path.join(PROJECT_ROOT, 'audit.json'), targetPath: AUDIT_FILE }
-    ];
-
-    await recoverPendingJsonFileTransaction(LEGACY_TRANSACTION_JOURNAL_FILE);
-    await fsPromises.mkdir(DATA_ROOT, { recursive: true });
-
-    for (const mapping of fileMappings) {
-        if (!(await shouldCopyLegacyFile(mapping.legacyPath, mapping.targetPath))) continue;
-        await fsPromises.mkdir(path.dirname(mapping.targetPath), { recursive: true });
-        await fsPromises.copyFile(mapping.legacyPath, mapping.targetPath);
-    }
-
-    const legacyBackupDir = path.join(PROJECT_ROOT, 'backups');
-    if (!fs.existsSync(legacyBackupDir)) return;
-
-    await fsPromises.mkdir(BACKUP_DIR, { recursive: true });
-    const legacyBackups = await fsPromises.readdir(legacyBackupDir, { withFileTypes: true });
-    for (const entry of legacyBackups) {
-        if (!entry.isFile()) continue;
-        const legacyPath = path.join(legacyBackupDir, entry.name);
-        const targetPath = path.join(BACKUP_DIR, entry.name);
-        if (!(await shouldCopyLegacyFile(legacyPath, targetPath))) continue;
-        await fsPromises.copyFile(legacyPath, targetPath);
     }
 }
 
@@ -162,7 +115,7 @@ let isChecking = false;
 let checkingItemId = null;
 let backgroundCheckRunCounter = 0;
 let activeBackgroundCheckToken = 0;
-let browserInstance = null; // Single persistent browser
+const browserFetcher = new BrowserFetcher({ validateUrl: validateFetchUrl, executablePath: resolveBrowserExecutablePath() });
 let checkIntervalHandle = null;
 let diagnostics = [];
 let auditLog = [];
@@ -179,7 +132,7 @@ const DEFAULT_ALERT_RULES = {
     staleHours: 12,
     notifyCooldownMinutes: 240
 };
-const alertCooldownByKey = new Map();
+
 let settings = {
     discordWebhook: process.env.DISCORD_WEBHOOK || '',
     telegramWebhook: process.env.TELEGRAM_BOT_TOKEN || '',
@@ -443,106 +396,15 @@ async function writeJsonFile(filePath, value) {
     }
 }
 
-async function cleanupJsonTransactionArtifacts(journal, journalPath = TRANSACTION_JOURNAL_FILE) {
-    const entries = Array.isArray(journal && journal.entries) ? journal.entries : [];
-    for (const entry of entries) {
-        if (entry && entry.tempPath) {
-            await fsPromises.rm(entry.tempPath, { force: true }).catch(() => { });
-        }
-        if (entry && entry.backupPath) {
-            await fsPromises.rm(entry.backupPath, { force: true }).catch(() => { });
-        }
-    }
-    await fsPromises.rm(journalPath, { force: true }).catch(() => { });
-}
-
-async function rollbackJsonFileTransaction(journal, journalPath = TRANSACTION_JOURNAL_FILE) {
-    const entries = Array.isArray(journal && journal.entries) ? journal.entries : [];
-    for (let i = entries.length - 1; i >= 0; i -= 1) {
-        const entry = entries[i];
-        if (!entry || !entry.targetPath) continue;
-        if (entry.hadOriginal && entry.backupPath) {
-            try {
-                await fsPromises.access(entry.backupPath);
-                await replaceFileAtomic(entry.backupPath, entry.targetPath);
-            } catch (_) { }
-        } else {
-            await fsPromises.rm(entry.targetPath, { force: true }).catch(() => { });
-        }
-        if (entry.tempPath) {
-            await fsPromises.rm(entry.tempPath, { force: true }).catch(() => { });
-        }
-    }
-    await cleanupJsonTransactionArtifacts(journal, journalPath);
-}
-
-async function recoverPendingJsonFileTransaction(journalPath = TRANSACTION_JOURNAL_FILE) {
-    if (!fs.existsSync(journalPath)) return;
-
-    let journal = null;
-    try {
-        journal = JSON.parse(await fsPromises.readFile(journalPath, 'utf8'));
-    } catch (error) {
-        throw new Error(`[Transaction] Recovery failed: could not read journal (${error.message})`);
-    }
-
-    if (!journal || !Array.isArray(journal.entries)) {
-        throw new Error('[Transaction] Recovery failed: journal is invalid');
-    }
-
-    console.warn('[Transaction] Incomplete state write detected. Rolling back pending file transaction.');
-    await rollbackJsonFileTransaction(journal, journalPath);
-}
-
-async function runJsonFileTransaction(entries) {
-    const journal = {
-        createdAt: new Date().toISOString(),
-        entries: []
-    };
-
-    try {
-        for (const entry of entries) {
-            const tempPath = createTempFilePath(entry.targetPath, 'next');
-            const backupPath = createTempFilePath(entry.targetPath, 'backup');
-            const hadOriginal = fs.existsSync(entry.targetPath);
-
-            await fsPromises.mkdir(path.dirname(entry.targetPath), { recursive: true });
-            await fsPromises.writeFile(tempPath, JSON.stringify(entry.nextValue, null, 2), 'utf8');
-            if (hadOriginal) {
-                await fsPromises.copyFile(entry.targetPath, backupPath);
-            }
-
-            journal.entries.push({
-                label: entry.label || path.basename(entry.targetPath),
-                targetPath: entry.targetPath,
-                tempPath,
-                backupPath,
-                hadOriginal
-            });
-        }
-
-        await writeJsonFile(TRANSACTION_JOURNAL_FILE, journal);
-
-        for (const entry of journal.entries) {
-            await replaceFileAtomic(entry.tempPath, entry.targetPath);
-        }
-
-        await cleanupJsonTransactionArtifacts(journal);
-    } catch (error) {
-        await rollbackJsonFileTransaction(journal).catch((rollbackError) => {
-            console.error('[Transaction] Rollback failed:', rollbackError.message);
-        });
-        throw error;
-    }
+async function commitState(entries) {
+    store.transaction(() => {
+        for (const entry of entries) store.set(entry.targetPath, entry.nextValue);
+    });
 }
 
 async function loadSettings() {
     try {
-        let fileSettings = {};
-        if (fs.existsSync(SETTINGS_FILE)) {
-            const data = await fsPromises.readFile(SETTINGS_FILE, 'utf8');
-            fileSettings = JSON.parse(data);
-        }
+        const fileSettings = store.get(SETTINGS_FILE, {});
         const nextSettings = applyEnvironmentSettings(normalizeSettingsShape({
             ...settings,
             ...fileSettings
@@ -556,13 +418,13 @@ async function loadSettings() {
             await saveSettings();
         }
     } catch (e) {
-        console.error('[Settings] Load failed:', e.message);
+        throw new Error(`Settings could not be loaded: ${e.message}`);
     }
 }
 
 async function saveSettings(nextSettings = settings) {
     try {
-        await writeJsonFile(SETTINGS_FILE, getPersistentSettingsSnapshot(nextSettings));
+        store.write(SETTINGS_FILE, getPersistentSettingsSnapshot(nextSettings));
     } catch (e) {
         console.error('[Settings] Save failed:', e.message);
         throw e;
@@ -675,23 +537,12 @@ function scheduleBackgroundChecks() {
 }
 
 async function loadDiagnostics() {
-    try {
-        if (!fs.existsSync(DIAGNOSTICS_FILE)) {
-            diagnostics = [];
-            return;
-        }
-        const data = await fsPromises.readFile(DIAGNOSTICS_FILE, 'utf8');
-        const parsed = JSON.parse(data);
-        diagnostics = normalizeDiagnosticsEntries(parsed);
-    } catch (e) {
-        console.error('[Diagnostics] Load failed:', e.message);
-        diagnostics = [];
-    }
+    diagnostics = normalizeDiagnosticsEntries(store.get(DIAGNOSTICS_FILE, []));
 }
 
 async function saveDiagnostics(nextDiagnostics = diagnostics) {
     try {
-        await writeJsonFile(DIAGNOSTICS_FILE, normalizeDiagnosticsEntries(nextDiagnostics));
+        store.write(DIAGNOSTICS_FILE, normalizeDiagnosticsEntries(nextDiagnostics));
     } catch (e) {
         console.error('[Diagnostics] Save failed:', e.message);
         throw e;
@@ -711,23 +562,12 @@ async function addDiagnostic(entry) {
 }
 
 async function loadAuditLog() {
-    try {
-        if (!fs.existsSync(AUDIT_FILE)) {
-            auditLog = [];
-            return;
-        }
-        const data = await fsPromises.readFile(AUDIT_FILE, 'utf8');
-        const parsed = JSON.parse(data);
-        auditLog = normalizeAuditEntries(parsed);
-    } catch (e) {
-        console.error('[Audit] Load failed:', e.message);
-        auditLog = [];
-    }
+    auditLog = normalizeAuditEntries(store.get(AUDIT_FILE, []));
 }
 
 async function saveAuditLog(nextAuditLog = auditLog) {
     try {
-        await writeJsonFile(AUDIT_FILE, normalizeAuditEntries(nextAuditLog));
+        store.write(AUDIT_FILE, normalizeAuditEntries(nextAuditLog));
     } catch (e) {
         console.error('[Audit] Save failed:', e.message);
         throw e;
@@ -856,7 +696,8 @@ function buildBackupSnapshot() {
         items: cloneJsonState(Array.isArray(items) ? items : []),
         settings: getBackupSettingsSnapshot(settings),
         diagnostics: cloneJsonState(Array.isArray(diagnostics) ? diagnostics : []),
-        audit: cloneJsonState(Array.isArray(auditLog) ? auditLog : [])
+        audit: cloneJsonState(Array.isArray(auditLog) ? auditLog : []),
+        runtime: cloneJsonState(runtime)
     }, {
         repairIds: false,
         allowDuplicateCanonicalUrls: false
@@ -998,8 +839,16 @@ async function writeEncryptedBackupFile(filename, snapshot, writeContext) {
     };
 }
 
-async function performBackup() {
-    return writeNamedBackup(`prices-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+async function performBackup({ alreadyLocked = false } = {}) {
+    const work = async () => {
+        const result = await writeNamedBackup(`prices-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+        const next = { ...runtime, backup: { lastAttempt: new Date().toISOString(),
+            lastSuccess: result.success ? new Date().toISOString() : runtime.backup?.lastSuccess || null,
+            error: result.success ? null : result.reason || result.error } };
+        store.write('runtime', next); runtime = next;
+        return result;
+    };
+    return alreadyLocked ? work() : runStateMutation(work);
 }
 
 async function writeNamedBackup(filename) {
@@ -1336,7 +1185,8 @@ async function restoreBackupSnapshot(snapshot) {
         nextValue: nextAudit
     }];
 
-    await runJsonFileTransaction(transactionEntries);
+    transactionEntries.push({ targetPath: 'runtime', nextValue: normalizedSnapshot.runtime });
+    await commitState(transactionEntries);
 
     items = nextItems;
     bumpItemsRevision();
@@ -1344,6 +1194,8 @@ async function restoreBackupSnapshot(snapshot) {
     bumpSettingsRevision();
     diagnostics = nextDiagnostics;
     auditLog = nextAudit;
+    runtime = normalizedSnapshot.runtime;
+    deliveryGeneration++;
     clearBackupEncryptionSession();
     scheduleBackgroundChecks();
 }
@@ -1399,7 +1251,8 @@ function normalizeBackupSnapshot(snapshot, options = {}) {
         items: normalizedItems,
         settings: normalizedSettings,
         diagnostics: normalizeDiagnosticsEntries(snapshot.diagnostics),
-        audit: normalizeAuditEntries(snapshot.audit)
+        audit: normalizeAuditEntries(snapshot.audit),
+        runtime: normalizeRuntime(snapshot.runtime)
     };
 }
 
@@ -1449,33 +1302,7 @@ app.get('/', (_req, res) => {
     sendFrontendFile(res, 'index.html');
 });
 
-// User Agents for rotation
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
-];
-
 // Helper Functions
-function isLegacyDemoItem(item) {
-    // Filters old seeded demo rows so production data stays clean.
-    if (!item) return false;
-    const id = String(item.id || '').toLowerCase();
-    const name = String(item.name || '').toLowerCase();
-    const url = String(item.url || '').toLowerCase();
-    return (
-        id === 'demo1' ||
-        id === 'demo2' ||
-        id === 'demo3' ||
-        name.includes('sony wh-1000xm5 wireless headphones') ||
-        name.includes('macbook air m2 15-inch') ||
-        name.includes('logitech mx master 3s') ||
-        url.includes('/demo1') ||
-        url.includes('/demo2') ||
-        url.includes('/demo3')
-    );
-}
-
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1597,8 +1424,10 @@ function normalizeIncomingItems(rawItems, fallbackListId, options = {}) {
             name: normalizedName,
             url: normalizedUrl,
             canonicalUrl,
+            createdAt: normalizeIsoDateStringOrNull(item.createdAt) || new Date().toISOString(),
             listId: nextListId,
             selector: normalizeOptionalStringOrNull(item.selector),
+            ...extractionOptions(item),
             currency: normalizeOptionalStringOrNull(item.currency)?.toUpperCase() || null,
             currentPrice: normalizeFiniteNumberOrNull(item.currentPrice),
             originalPrice: normalizeFiniteNumberOrNull(item.originalPrice),
@@ -1632,38 +1461,17 @@ function normalizeIncomingItems(rawItems, fallbackListId, options = {}) {
 }
 
 async function loadData() {
-    try {
-        const data = await fsPromises.readFile(DATA_FILE, 'utf8');
-        const parsed = JSON.parse(data);
-        const fallbackListId = (settings.lists && settings.lists[0] && settings.lists[0].id) || 'default';
-        const validListIds = new Set((settings.lists || DEFAULT_LISTS).map(list => list.id));
-        const { items: normalizedItems, changed } = normalizeIncomingItems(Array.isArray(parsed) ? parsed : [], fallbackListId, {
-            repairIds: true,
-            validListIds,
-            allowDuplicateCanonicalUrls: false,
-            dropDuplicateCanonicalUrls: true
-        });
-        items = normalizedItems.filter(item => !isLegacyDemoItem(item));
-        if (changed || items.length !== normalizedItems.length) {
-            await saveData(items, { allowDuplicateCanonicalUrls: false });
-        }
-        bumpItemsRevision();
-        console.log(`Loaded ${items.length} items from disk.`);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.log('No data file found, starting with empty list.');
-            items = [];
-            bumpItemsRevision();
-        } else {
-            console.error('Failed to load data:', error.message);
-        }
-    }
+    // A malformed database is a startup error, never an empty collection that
+    // could later overwrite existing state.
+    items = normalizeItemsForPersistence(store.get(DATA_FILE, []), { allowDuplicateCanonicalUrls: false });
+    bumpItemsRevision();
+    console.log(`Loaded ${items.length} items from database.`);
 }
 
 async function saveData(nextItems = items, options = {}) {
     try {
         const normalized = normalizeItemsForPersistence(nextItems, options);
-        await writeJsonFile(DATA_FILE, normalized);
+        store.write(DATA_FILE, normalized);
         return normalized;
     } catch (error) {
         console.error('Failed to save data:', error.message);
@@ -1760,11 +1568,12 @@ function normalizeSelectorValue(value) {
     return normalizeOptionalStringOrNull(value);
 }
 
-function itemSourceChanged(currentItem, expectedUrl, expectedSelector) {
+function itemSourceChanged(currentItem, expectedUrl, expectedSelector, expectedOptions = {}) {
     const normalizedExpectedUrl = normalizeOptionalString(expectedUrl, currentItem.url);
     const normalizedExpectedSelector = normalizeSelectorValue(expectedSelector);
     return currentItem.url !== normalizedExpectedUrl
-        || normalizeSelectorValue(currentItem.selector) !== normalizedExpectedSelector;
+        || normalizeSelectorValue(currentItem.selector) !== normalizedExpectedSelector
+        || JSON.stringify(extractionOptions(currentItem)) !== JSON.stringify(extractionOptions(expectedOptions));
 }
 
 function buildSuccessfulCheckItem(currentItem, extraction, nowIso = new Date().toISOString()) {
@@ -1786,10 +1595,11 @@ function buildSuccessfulCheckItem(currentItem, extraction, nowIso = new Date().t
     if (!isOutOfStock && price !== null) {
         nextItem.currentPrice = price;
     }
-    if (extraction && extraction.currency) nextItem.currency = extraction.currency;
-    if (extraction && extraction.selectorUsed && !nextItem.selector) nextItem.selector = extraction.selectorUsed;
+    if (!isOutOfStock && extraction && extraction.currency) nextItem.currency = extraction.currency;
+    nextItem.lastSelectorUsed = extraction?.selectorUsed || null;
     nextItem.extractionConfidence = extraction && extraction.confidence ? extraction.confidence : (nextItem.extractionConfidence || 0);
     nextItem.stockStatus = stockStatus;
+    if (stockStatus !== 'unknown') nextItem.lastKnownStockStatus = stockStatus;
     nextItem.stockConfidence = Number(availability.confidence || 0);
     nextItem.stockReason = availability.reason || '';
     nextItem.stockSource = availability.source || null;
@@ -1806,8 +1616,12 @@ function buildSuccessfulCheckItem(currentItem, extraction, nowIso = new Date().t
     nextItem.lastCheckAttempt = nowIso;
     nextItem.lastCheckStatus = 'ok';
     nextItem.lastCheckError = '';
-    nextItem.currency = nextItem.currency || 'USD';
-    if (Number.isFinite(price)) {
+    nextItem.lastCheckErrorCode = null;
+    nextItem.retryAt = null;
+    nextItem.consecutiveFailures = 0;
+    nextItem.pendingPrice = null;
+    nextItem.currency = nextItem.currency || null;
+    if (!isOutOfStock && Number.isFinite(price)) {
         nextItem.lastSeenPrice = Number(price);
         nextItem.priceInUSD = convertToUSD(price, nextItem.currency);
     }
@@ -1838,13 +1652,16 @@ function buildFailedCheckItem(currentItem, errorMessage, nowIso = new Date().toI
         ...cloneJsonState(currentItem),
         lastCheckAttempt: nowIso,
         lastCheckStatus: 'fail',
+        consecutiveFailures: Number(currentItem.consecutiveFailures || 0) + 1,
         lastCheckError: normalizeOptionalString(errorMessage, 'Check failed')
     };
 }
 
 function getItemValidationStatus(errorMessage = '') {
     return errorMessage && (
-        errorMessage.startsWith('Invalid data format')
+        errorMessage.startsWith('Invalid')
+        || errorMessage.startsWith('Unsupported currency')
+        || errorMessage.startsWith('Currency override')
         || errorMessage.startsWith('Invalid item at index')
         || errorMessage.startsWith('Missing item id')
         || errorMessage.startsWith('Missing item name')
@@ -1855,921 +1672,6 @@ function getItemValidationStatus(errorMessage = '') {
     )
         ? 400
         : 500;
-}
-
-const BASE_PRICE_SELECTORS = [
-    'meta[property="og:price:amount"]',
-    'meta[itemprop="price"]',
-    'meta[property="product:price:amount"]',
-    'meta[name="twitter:data1"]',
-    '[itemprop="price"]',
-    '[data-test-id*="price"]',
-    '[data-testid*="price"]',
-    '[class*="price"]',
-    '[id*="price"]',
-    '.price',
-    '.product-price',
-    '.new-price',
-    '.current-price',
-    '.discount_price',
-    '.indirimli_fiyat',
-    '.satis_fiyati',
-    '.a-price .a-offscreen',
-    '#priceblock_ourprice',
-    '#priceblock_dealprice'
-];
-
-const SITE_ADAPTERS = [
-    {
-        match: /amazon\./i,
-        selectors: [
-            '#corePrice_feature_div .a-price .a-offscreen',
-            '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
-            '#corePriceDisplay_mobile_feature_div .a-price .a-offscreen',
-            '#apex_desktop .a-price .a-offscreen',
-            '#apex_mobile .a-price .a-offscreen',
-            '#price_inside_buybox',
-            '#priceblock_saleprice',
-            '#priceblock_ourprice',
-            'input#twister-plus-price-data-price'
-        ]
-    },
-    {
-        match: /trendyol\.com/i,
-        selectors: ['.prc-dsc', '.prc-slg', '[class*="prc"]', '[data-test-id*="price"]']
-    },
-    {
-        match: /hepsiburada\.com/i,
-        selectors: ['[data-test-id="price-current-price"]', '[id*="offering-price"]', '[class*="price"]']
-    },
-    {
-        match: /n11\.com/i,
-        selectors: ['.newPrice ins', '.newPrice', '[class*="price"]']
-    },
-    {
-        match: /boyner\.com\.tr/i,
-        selectors: ['.m-productPrice__salePrice', '[class*="salePrice"]', '[class*="price"]']
-    }
-];
-
-function getDomainHints(targetUrl = '') {
-    try {
-        const host = new URL(targetUrl).hostname.toLowerCase();
-        if (host.endsWith('.tr') || /trendyol|hepsiburada|n11|boyner|amazon\.com\.tr/.test(host)) {
-            return { preferredCurrency: 'TRY', selectors: getSiteSelectors(host) };
-        }
-        if (/amazon\.de|\.de$/.test(host)) return { preferredCurrency: 'EUR', selectors: getSiteSelectors(host) };
-        if (/amazon\.co\.uk|\.co\.uk$/.test(host)) return { preferredCurrency: 'GBP', selectors: getSiteSelectors(host) };
-        if (/amazon\.jp|\.jp$/.test(host)) return { preferredCurrency: 'JPY', selectors: getSiteSelectors(host) };
-        if (/amazon\.ca|\.ca$/.test(host)) return { preferredCurrency: 'CAD', selectors: getSiteSelectors(host) };
-        if (/amazon\.com\.au|\.com\.au$/.test(host)) return { preferredCurrency: 'AUD', selectors: getSiteSelectors(host) };
-        if (/amazon\.com|\.com$/.test(host)) return { preferredCurrency: 'USD', selectors: getSiteSelectors(host) };
-        return { preferredCurrency: 'USD', selectors: getSiteSelectors(host) };
-    } catch {
-        return { preferredCurrency: 'USD', selectors: [] };
-    }
-}
-
-function getSiteSelectors(hostname) {
-    const adapter = SITE_ADAPTERS.find(a => a.match.test(hostname));
-    return adapter ? adapter.selectors : [];
-}
-
-function isAmazonTarget(targetUrl = '') {
-    try {
-        return /amazon\./i.test(new URL(targetUrl).hostname);
-    } catch {
-        return /amazon\./i.test(String(targetUrl || ''));
-    }
-}
-
-function detectCurrencyFromText(text, fallback = 'USD') {
-    const t = String(text || '').toUpperCase();
-    if (/(\u20BA|(^|[^A-Z])TRY([^A-Z]|$)|(^|[^A-Z])TL([^A-Z]|$))/i.test(t)) return 'TRY';
-    if (/(\u20AC|(^|[^A-Z])EUR([^A-Z]|$))/i.test(t)) return 'EUR';
-    if (/(\u00A3|(^|[^A-Z])GBP([^A-Z]|$))/i.test(t)) return 'GBP';
-    if (/(^|[^A-Z])JPY([^A-Z]|$)|\u00A5/.test(t)) return 'JPY';
-    if (/(^|[^A-Z])CAD([^A-Z]|$)/.test(t)) return 'CAD';
-    if (/(^|[^A-Z])AUD([^A-Z]|$)/.test(t)) return 'AUD';
-    if (/(^|[^A-Z])CHF([^A-Z]|$)/.test(t)) return 'CHF';
-    if (/(^|[^A-Z])CNY([^A-Z]|$)|\u00A5/.test(t)) return 'CNY';
-    if (/(\$|(^|[^A-Z])USD([^A-Z]|$))/i.test(t)) return 'USD';
-    return fallback;
-}
-
-const OUT_OF_STOCK_TERMS = [
-    'out of stock', 'out-of-stock', 'sold out', 'currently unavailable', 'temporarily unavailable',
-    'not available', 'unavailable', 'not in stock', 'currently out of stock',
-    'backorder', 'back order', 'preorder', 'pre-order', 'notify me',
-    'email me when available', 'coming soon',
-    'stokta yok', 'stok yok', 'stokta bulunmuyor', 'stokta bulunmamakta', 'stokta bulunmamaktadir',
-    'mevcut degil', 'su anda mevcut degil', 'su an mevcut degil', 'gecici olarak stokta yok',
-    'simdilik mevcut degil', 'urun mevcut degil', 'tukendi', 'satista degil', 'satista yok',
-    'stoga gelince haber ver', 'haber ver',
-    'agotado', 'sin stock', 'no disponible',
-    'rupture de stock', 'epuise', 'indisponible',
-    'ausverkauft', 'nicht verfugbar', 'nicht auf lager',
-    'esgotado', 'sem estoque',
-    'esaurito', 'non disponibile',
-    'niet op voorraad', 'uitverkocht',
-    'brak w magazynie', 'niedostepny',
-    'net v nalichii', 'rasprodano'
-];
-
-const IN_STOCK_TERMS = [
-    'in stock', 'available now', 'ready to ship', 'ships today', 'buy now', 'add to cart',
-    'sepete ekle', 'hemen al', 'stokta', 'mevcut', 'satin al',
-    'en stock', 'disponible',
-    'auf lager', 'verfugbar',
-    'disponivel', 'em estoque',
-    'disponibile',
-    'op voorraad',
-    'dostepny', 'w magazynie',
-    'v nalichii'
-];
-
-function normalizeAvailabilityText(value) {
-    return String(value || '')
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/ı/g, 'i')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-const NORMALIZED_OUT_OF_STOCK_TERMS = OUT_OF_STOCK_TERMS.map(normalizeAvailabilityText).filter(Boolean);
-const NORMALIZED_IN_STOCK_TERMS = IN_STOCK_TERMS.map(normalizeAvailabilityText).filter(Boolean);
-
-function scoreAvailabilityText(rawText) {
-    const text = normalizeAvailabilityText(rawText);
-    if (!text) return null;
-
-    let outScore = 0;
-    let inScore = 0;
-    let outReason = '';
-    let inReason = '';
-
-    for (const term of NORMALIZED_OUT_OF_STOCK_TERMS) {
-        if (text.includes(term)) {
-            const score = term.length > 10 ? 70 : 60;
-            if (score > outScore) {
-                outScore = score;
-                outReason = term;
-            }
-        }
-    }
-
-    for (const term of NORMALIZED_IN_STOCK_TERMS) {
-        if (text.includes(term)) {
-            const score = term.length > 10 ? 62 : 54;
-            if (score > inScore) {
-                inScore = score;
-                inReason = term;
-            }
-        }
-    }
-
-    if (!outScore && !inScore) return null;
-    return { outScore, inScore, outReason, inReason };
-}
-
-function detectShopifyAvailabilityFromRawHtml(htmlString) {
-    const raw = String(htmlString || '');
-    if (!raw) return null;
-
-    const isShopifyLike = /(myshopify\.com|Shopify\.shop|\/cdn\/shop\/|shopify-digital-wallet)/i.test(raw);
-    if (!isShopifyLike) return null;
-
-    // Common Shopify product data surfaces used by many themes/apps.
-    const hasBisOutOfStock = /_BISConfig\.product\s*=\s*\{[\s\S]{0,120000}?"available"\s*:\s*false/i.test(raw)
-        || /_BISConfig\.product\.variants\[[0-9]+\]\['oos'\]\s*=\s*true/i.test(raw);
-    const hasSchemaOutOfStock = /"availability"\s*:\s*"https?:\/\/schema\.org\/OutOfStock"/i.test(raw);
-    const hasBisInStock = /_BISConfig\.product\s*=\s*\{[\s\S]{0,120000}?"available"\s*:\s*true/i.test(raw);
-    const hasSchemaInStock = /"availability"\s*:\s*"https?:\/\/schema\.org\/InStock"/i.test(raw);
-
-    if (hasBisOutOfStock || hasSchemaOutOfStock) {
-        return {
-            status: 'out_of_stock',
-            confidence: 96,
-            reason: hasBisOutOfStock ? 'shopify product json available=false' : 'shopify schema outofstock',
-            source: hasBisOutOfStock ? 'shopify-product-json' : 'shopify-schema'
-        };
-    }
-    if (hasBisInStock || hasSchemaInStock) {
-        return {
-            status: 'in_stock',
-            confidence: 91,
-            reason: hasBisInStock ? 'shopify product json available=true' : 'shopify schema instock',
-            source: hasBisInStock ? 'shopify-product-json' : 'shopify-schema'
-        };
-    }
-    return null;
-}
-
-function detectAvailability($, htmlString, targetUrl = '') {
-    let bestOut = { score: 0, reason: '', source: '' };
-    let bestIn = { score: 0, reason: '', source: '' };
-    let hasEnabledPurchaseAction = false;
-    let hasDisabledPurchaseAction = false;
-    let hasBuyingOptionsAction = false;
-    let hasAmazonBuyingOptionsStructure = false;
-    let hasAmazonUnqualifiedBuyBox = false;
-    let requiresVariantSelection = false;
-    let hasVariantSelectors = false;
-    let structuredOut = null;
-    let structuredIn = null;
-    const isAmazon = isAmazonTarget(targetUrl);
-    const withSignals = (result) => ({
-        ...result,
-        signals: {
-            isAmazon,
-            hasEnabledPurchaseAction,
-            hasDisabledPurchaseAction,
-            hasBuyingOptionsAction,
-            hasAmazonBuyingOptionsStructure,
-            hasAmazonUnqualifiedBuyBox,
-            requiresVariantSelection,
-            hasVariantSelectors,
-            bestInScore: bestIn.score,
-            bestOutScore: bestOut.score
-        }
-    });
-
-    const isLikelyHidden = (el) => {
-        const node = $(el);
-        const style = normalizeAvailabilityText(node.attr('style'));
-        const classes = normalizeAvailabilityText(node.attr('class'));
-        const hiddenAttr = node.attr('hidden') !== undefined || normalizeAvailabilityText(node.attr('aria-hidden')) === 'true';
-        if (hiddenAttr) return true;
-        if (style && /(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0)/.test(style)) return true;
-        if (classes && /(^|\s)(hidden|d-none|sr-only|visually-hidden)(\s|$)/.test(classes)) return true;
-        return false;
-    };
-
-    const setStructured = (status, confidence, reason, source) => {
-        if (status === 'out_of_stock') {
-            if (!structuredOut || confidence > structuredOut.confidence) {
-                structuredOut = { status, confidence, reason, source };
-            }
-        } else if (status === 'in_stock') {
-            if (!structuredIn || confidence > structuredIn.confidence) {
-                structuredIn = { status, confidence, reason, source };
-            }
-        }
-    };
-
-    const classifyStructuredToken = (rawValue) => {
-        const v = normalizeAvailabilityText(rawValue);
-        if (!v) return null;
-        if (/(outofstock|out_of_stock|soldout|sold_out|discontinued|unavailable|currentlyunavailable|temporarilyunavailable|notinstock|preorder|pre-order|backorder|back-order)/.test(v)) {
-            return { status: 'out_of_stock', confidence: 94, reason: v.slice(0, 120) };
-        }
-        if (/(instock|in_stock|limitedavailability|availablefororder)/.test(v)) {
-            return { status: 'in_stock', confidence: 90, reason: v.slice(0, 120) };
-        }
-        return null;
-    };
-
-    const considerSignal = (text, baseScore, source) => {
-        const scored = scoreAvailabilityText(text);
-        if (!scored) return;
-        const outScore = Math.min(100, scored.outScore ? scored.outScore + baseScore : 0);
-        const inScore = Math.min(100, scored.inScore ? scored.inScore + baseScore : 0);
-        if (outScore > bestOut.score) {
-            bestOut = { score: outScore, reason: scored.outReason || String(text || '').slice(0, 80), source };
-        }
-        if (inScore > bestIn.score) {
-            bestIn = { score: inScore, reason: scored.inReason || String(text || '').slice(0, 80), source };
-        }
-    };
-
-    const availabilityMeta = [
-        $('meta[itemprop="availability"]').attr('content'),
-        $('link[itemprop="availability"]').attr('href'),
-        $('meta[property="product:availability"]').attr('content')
-    ].filter(Boolean);
-    availabilityMeta.forEach((v) => {
-        considerSignal(v, 20, 'meta-availability');
-        const cls = classifyStructuredToken(v);
-        if (cls) setStructured(cls.status, cls.confidence, cls.reason, 'meta-availability');
-    });
-
-    $('script[type*="ld+json"]').slice(0, 25).each((_, el) => {
-        const raw = $(el).contents().text();
-        if (!raw) return;
-        let parsed;
-        try {
-            parsed = JSON.parse(raw);
-        } catch {
-            return;
-        }
-        const stack = Array.isArray(parsed) ? [...parsed] : [parsed];
-        while (stack.length) {
-            const node = stack.pop();
-            if (!node || typeof node !== 'object') continue;
-            if (Array.isArray(node)) {
-                stack.push(...node);
-                continue;
-            }
-            for (const key of ['availability', 'offerAvailability']) {
-                if (!node[key]) continue;
-                const value = String(node[key]);
-                considerSignal(value, 22, 'jsonld-availability');
-                const cls = classifyStructuredToken(value);
-                if (cls) setStructured(cls.status, cls.confidence, cls.reason, 'jsonld-availability');
-            }
-            for (const childKey of Object.keys(node)) {
-                if (node[childKey] && typeof node[childKey] === 'object') stack.push(node[childKey]);
-            }
-        }
-    });
-
-    const shopifyRawAvailability = detectShopifyAvailabilityFromRawHtml(htmlString);
-    if (shopifyRawAvailability) {
-        setStructured(
-            shopifyRawAvailability.status,
-            Number(shopifyRawAvailability.confidence || 0),
-            shopifyRawAvailability.reason,
-            shopifyRawAvailability.source
-        );
-    }
-
-    const stockSelectors = [
-        '#availability',
-        '#availability span',
-        '#availabilityInsideBuyBox_feature_div',
-        '#availabilityInsideBuyBox_feature_div span',
-        '#outOfStock',
-        '#outOfStock span',
-        '#availabilityMessage_feature_div',
-        '#availabilityMessage_feature_div span',
-        '[itemprop="availability"]',
-        '[class*="stock"]',
-        '[id*="stock"]',
-        '[class*="availability"]',
-        '[id*="availability"]',
-        '[data-stock]',
-        '[data-availability]',
-        '[data-test-id*="stock"]',
-        '[data-testid*="stock"]',
-        '[data-test-id*="availability"]',
-        '[data-testid*="availability"]'
-    ];
-    stockSelectors.forEach((sel) => {
-        $(sel).slice(0, 20).each((_, el) => {
-            if (isLikelyHidden(el)) return;
-            const text = $(el).attr('content') || $(el).attr('aria-label') || $(el).text();
-            const compact = normalizeAvailabilityText(text);
-            if (!compact || compact.length > 500) return;
-            considerSignal(compact, 18, `selector:${sel}`);
-        });
-    });
-
-    if (isAmazon) {
-        hasAmazonUnqualifiedBuyBox = $('#unqualifiedBuyBox, #unqualifiedBuyBox_feature_div').length > 0;
-        if (hasAmazonUnqualifiedBuyBox) {
-            hasBuyingOptionsAction = true;
-            if (bestOut.score < 88) {
-                bestOut = { score: 88, reason: 'unqualified buy box', source: 'amazon-unqualified-buybox' };
-            }
-        }
-
-        hasAmazonBuyingOptionsStructure = $([
-            '#buybox-see-all-buying-choices',
-            '[data-action="show-all-offers-display"]',
-            '#all-offers-display',
-            '#aod-has-oas-offers',
-            'a[href*="/gp/offer-listing/"]',
-            'a[href*="ref=dp_olp"]'
-        ].join(',')).length > 0;
-        if (hasAmazonBuyingOptionsStructure) {
-            hasBuyingOptionsAction = true;
-            if (bestOut.score < 72) {
-                bestOut = { score: 72, reason: 'amazon buying options structure', source: 'amazon-buying-options-structure' };
-            }
-        }
-
-        $('#buybox a, #desktop_buybox a, #availability_feature_div a').slice(0, 80).each((_, el) => {
-            if (isLikelyHidden(el)) return;
-            const t = normalizeAvailabilityText($(el).attr('aria-label') || $(el).text());
-            if (!t) return;
-            if (/(see all buying options|all buying options|buying options|satin alma seceneklerini gor|satın alma seceneklerini gor|satın alma seçeneklerini gör)/.test(t)) {
-                hasBuyingOptionsAction = true;
-                if (bestOut.score < 74) {
-                    bestOut = { score: 74, reason: t, source: 'amazon-buying-options-link' };
-                }
-            }
-        });
-    }
-
-    $('button, input[type="submit"], [role="button"], a[role="button"]').slice(0, 160).each((_, el) => {
-        if (isLikelyHidden(el)) return;
-        const node = $(el);
-        const text = node.attr('aria-label') || node.attr('value') || node.text() || '';
-        const normalizedText = normalizeAvailabilityText(text);
-        const attrBlob = normalizeAvailabilityText([
-            node.attr('id'),
-            node.attr('name'),
-            node.attr('class'),
-            node.attr('data-testid'),
-            node.attr('data-test-id')
-        ].filter(Boolean).join(' '));
-        const isDisabled = node.is(':disabled')
-            || node.attr('disabled') !== undefined
-            || normalizeAvailabilityText(node.attr('aria-disabled')) === 'true';
-
-        const hasKeyboardShortcutHint = /(shift|alt|option|ctrl|cmd|command)\b/.test(normalizedText);
-        const looksLikeShortcutPurchaseLabel = /(add to cart|buy now|sepete ekle|hemen al|satin al|satın al)/.test(normalizedText) && hasKeyboardShortcutHint;
-        if (!(isAmazon && looksLikeShortcutPurchaseLabel)) {
-            considerSignal(normalizedText, isDisabled ? 12 : 6, 'button');
-        }
-
-        const actionBlob = `${normalizedText} ${attrBlob}`;
-        const isBuyingOptionsAction = /(see all buying options|all buying options|buying options|satin alma seceneklerini gor|satın alma seceneklerini gor|satın alma seçeneklerini gör)/.test(normalizedText);
-        const isPurchaseAction = /(add to cart|buy now|checkout|sepete ekle|hemen al|satin al|satın al|addtocart|buynow|buy-now)/.test(actionBlob)
-            && !(isAmazon && looksLikeShortcutPurchaseLabel);
-        const isNotifyAction = /(notify me|email me|haber ver|gelince haber ver)/.test(normalizedText);
-        const isVariantSelectionPrompt = /(select size|choose size|select option|choose option|select variant|choose variant|beden sec|beden seç|numara sec|numara seç|varyant sec|varyant seç|renk sec|renk seç|lütfen sec|lutfen sec)/.test(normalizedText);
-
-        if (isVariantSelectionPrompt) {
-            requiresVariantSelection = true;
-        }
-
-        if (isBuyingOptionsAction) {
-            hasBuyingOptionsAction = true;
-        }
-        if (isBuyingOptionsAction && !hasEnabledPurchaseAction && bestOut.score < 68) {
-            bestOut = { score: 68, reason: normalizedText || 'buying options only', source: 'buying-options' };
-        }
-        if (isPurchaseAction && !isDisabled && !isBuyingOptionsAction) {
-            hasEnabledPurchaseAction = true;
-            if (bestIn.score < 78) {
-                bestIn = { score: 78, reason: normalizedText || attrBlob || 'purchase-action', source: 'purchase-action' };
-            }
-        }
-        if (isPurchaseAction && isDisabled && !isBuyingOptionsAction) {
-            hasDisabledPurchaseAction = true;
-            if (bestOut.score < 80) {
-                bestOut = { score: 80, reason: normalizedText || 'disabled purchase action', source: 'purchase-action-disabled' };
-            }
-        }
-        if (isNotifyAction) {
-            if (bestOut.score < 74) {
-                bestOut = { score: 74, reason: normalizedText || 'notify action', source: 'notify-action' };
-            }
-        }
-    });
-
-    // Detect presence of configurable variants (size/color/model) in a generic way.
-    $('select').slice(0, 20).each((_, el) => {
-        if (isLikelyHidden(el)) return;
-        const node = $(el);
-        const optionCount = node.find('option').length;
-        const attrs = normalizeAvailabilityText([
-            node.attr('name'),
-            node.attr('id'),
-            node.attr('class'),
-            node.attr('aria-label')
-        ].filter(Boolean).join(' '));
-        if (optionCount > 1 || /(size|beden|numara|renk|color|variant|varyant|secenek|secenekler|option)/.test(attrs)) {
-            hasVariantSelectors = true;
-        }
-    });
-
-    if (!requiresVariantSelection) {
-        const shortBody = normalizeAvailabilityText($('body').text()).slice(0, 12000);
-        if (/(select size|choose size|select option|choose option|select variant|choose variant|beden sec|beden seç|numara sec|numara seç|varyant sec|varyant seç|renk sec|renk seç|once beden sec|önce beden seç)/.test(shortBody)) {
-            requiresVariantSelection = true;
-        }
-    }
-
-    // Some stores require size/variant selection before carting; this is not out-of-stock by itself.
-    if (requiresVariantSelection) {
-        if (bestOut.score < 92) {
-            bestOut.score = Math.min(bestOut.score, 70);
-        }
-        if (bestIn.score < 72 && (hasEnabledPurchaseAction || $('select').length > 0)) {
-            bestIn = { score: 72, reason: 'variant selection required', source: 'variant-selection' };
-        }
-    }
-
-    // Variant selectors + disabled cart button usually means "choose an option first", not "out of stock".
-    if ((requiresVariantSelection || hasVariantSelectors) && hasDisabledPurchaseAction && !hasEnabledPurchaseAction) {
-        const outIsStrongStructured = structuredOut && structuredOut.confidence >= 94;
-        if (!outIsStrongStructured && bestOut.score < 92) {
-            return withSignals({
-                status: 'in_stock',
-                confidence: Math.max(bestIn.score, 72),
-                reason: bestIn.reason || 'Variant selection required before purchase',
-                source: bestIn.source || 'variant-selection'
-            });
-        }
-    }
-
-    if (structuredOut && (!structuredIn || structuredOut.confidence >= structuredIn.confidence + 2)) {
-        return withSignals(structuredOut);
-    }
-    if (structuredIn && !structuredOut) {
-        return withSignals(structuredIn);
-    }
-
-    if (hasEnabledPurchaseAction && !hasDisabledPurchaseAction && bestOut.score < 88) {
-        return withSignals({
-            status: 'in_stock',
-            confidence: Math.max(bestIn.score, 74),
-            reason: bestIn.reason || 'Purchase action available',
-            source: bestIn.source || 'purchase-action'
-        });
-    }
-
-    if (bestOut.score >= 82 && bestOut.score >= bestIn.score + 10) {
-        return withSignals({
-            status: 'out_of_stock',
-            confidence: bestOut.score,
-            reason: bestOut.reason || 'Out-of-stock signal detected',
-            source: bestOut.source || null
-        });
-    }
-    if (bestIn.score >= 72 && bestIn.score >= bestOut.score + 6) {
-        return withSignals({
-            status: 'in_stock',
-            confidence: bestIn.score,
-            reason: bestIn.reason || 'In-stock signal detected',
-            source: bestIn.source || null
-        });
-    }
-    if (hasDisabledPurchaseAction && bestOut.score >= 74) {
-        return withSignals({
-            status: 'out_of_stock',
-            confidence: bestOut.score,
-            reason: bestOut.reason || 'Disabled purchase action detected',
-            source: bestOut.source || 'purchase-action-disabled'
-        });
-    }
-
-    if (isAmazon && !hasEnabledPurchaseAction) {
-        const amazonAvailabilityText = normalizeAvailabilityText([
-            $('#availability').text(),
-            $('#availability_feature_div').text(),
-            $('#availabilityInsideBuyBox_feature_div').text(),
-            $('#outOfStock').text(),
-            $('#availabilityMessage_feature_div').text(),
-            $('meta[name="description"]').attr('content'),
-            $('title').text()
-        ].filter(Boolean).join(' '));
-        if (/(currently unavailable|temporarily unavailable|temporarily out of stock|currently out of stock|out of stock|not available|stokta yok|stokta bulunmuyor|su anda mevcut degil|gecici olarak stokta yok|urun mevcut degil|mevcut degil)/.test(amazonAvailabilityText)) {
-            return withSignals({
-                status: 'out_of_stock',
-                confidence: Math.max(bestOut.score, 90),
-                reason: amazonAvailabilityText.slice(0, 180) || 'Amazon availability indicates out of stock',
-                source: 'amazon-availability'
-            });
-        }
-    }
-
-    // Amazon pages can expose "buying options" even when first-party stock is unavailable.
-    // If there is no reliable on-page price and only buying-options actions are present,
-    // classify as out_of_stock for primary offer tracking.
-    if (isAmazon && hasBuyingOptionsAction && !hasEnabledPurchaseAction && bestIn.score < 78) {
-        return withSignals({
-            status: 'out_of_stock',
-            confidence: Math.max(bestOut.score, 84),
-            reason: bestOut.reason || 'Buying options shown without a direct purchasable offer/price',
-            source: bestOut.source || 'buying-options'
-        });
-    }
-
-    return withSignals({
-        status: 'unknown',
-        confidence: Math.max(bestIn.score, bestOut.score, 0),
-        reason: '',
-        source: null
-    });
-}
-
-function normalizePriceString(rawNum, currencyHint = 'USD') {
-    let s = String(rawNum || '').trim().replace(/\s/g, '');
-    if (!s) return null;
-    const turkishLike = currencyHint === 'TRY';
-
-    if (s.includes('.') && s.includes(',')) {
-        const lastDot = s.lastIndexOf('.');
-        const lastComma = s.lastIndexOf(',');
-        if (lastComma > lastDot) {
-            s = s.replace(/\./g, '').replace(',', '.');
-        } else {
-            s = s.replace(/,/g, '');
-        }
-    } else if (s.includes(',')) {
-        if (turkishLike || /,[0-9]{2}$/.test(s)) s = s.replace(',', '.');
-        else s = s.replace(/,/g, '');
-    } else if (s.includes('.')) {
-        const parts = s.split('.');
-        if (turkishLike && parts[parts.length - 1].length === 3) s = s.replace(/\./g, '');
-    }
-
-    const n = parseFloat(s);
-    if (!Number.isFinite(n)) return null;
-    return n;
-}
-
-function extractNumericCandidates(text) {
-    if (!text) return [];
-    const re = /([0-9]{1,3}(?:[.,\s][0-9]{3})*(?:[.,][0-9]{1,2})|[0-9]+(?:[.,][0-9]{1,2})?)/g;
-    return Array.from(String(text).matchAll(re)).map(m => m[1]).slice(0, 6);
-}
-
-function normalizeConfidence(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return 0;
-    return Math.max(0, Math.min(100, Math.round(n)));
-}
-
-function buildCandidate(text, selector, source, preferredCurrency, scoreBase = 0) {
-    const rawText = String(text || '').trim();
-    if (!rawText) return null;
-    if (rawText.length > 220) return null;
-
-    const currency = detectCurrencyFromText(rawText, preferredCurrency);
-    const rawNumbers = extractNumericCandidates(rawText);
-    if (!rawNumbers.length) return null;
-    const hasExplicitCurrency = /(\u20BA|\u20AC|\u00A3|\$|\bTRY\b|\bUSD\b|\bEUR\b|\bGBP\b|\bJPY\b|\bCAD\b|\bAUD\b|\bCHF\b|\bCNY\b|\bTL\b)/i.test(rawText);
-    if (rawNumbers.length > 2 && !hasExplicitCurrency) return null;
-    if (source === 'text' && !hasExplicitCurrency && !/(price|fiyat|sale|deal|discount|ourprice)/i.test(rawText)) return null;
-
-    const price = normalizePriceString(rawNumbers[0], currency);
-    if (!Number.isFinite(price) || price <= 0) return null;
-
-    let score = scoreBase;
-    const lc = rawText.toLowerCase();
-    if (/(price|fiyat|sale|deal|current|ourprice|discount)/.test(lc)) score += 25;
-    if (/(shipping|delivery|kargo|installment|taksit|monthly|month|save)/.test(lc)) score -= 25;
-    if (/(availability|website|url|vat|date|mm\/dd\/yyyy)/.test(lc)) score -= 40;
-    if (/(width|height|margin|padding|font|button|registry|spacing)/.test(lc)) score -= 45;
-    if (selector && /(price|fiyat|ourprice|deal|sale|discount)/i.test(selector)) score += 18;
-    if (selector && /(old|strike|cross|was|list|compare)/i.test(selector)) score -= 20;
-    if (selector && /(\[class\*="price"\]|\[id\*="price"\])/.test(selector)) score -= 20;
-    if (preferredCurrency && currency !== preferredCurrency && source !== 'json-ld') score -= 12;
-    if (price < 2 && source !== 'json-ld') score -= 50;
-    if (SUPPORTED_CURRENCIES.has(currency)) score += 8;
-    if (price > 0 && price < 2000000) score += 5;
-
-    return {
-        price,
-        currency,
-        selector: selector || '',
-        source,
-        score,
-        snippet: rawText.replace(/\s+/g, ' ').slice(0, 140)
-    };
-}
-
-function extractFromRawPatterns(htmlString, preferredCurrency, targetUrl = '') {
-    const candidates = [];
-    const html = String(htmlString || '');
-    if (!html) return candidates;
-
-    const pushRaw = (rawPrice, rawCurrency, score, source, selector = '') => {
-        const currency = rawCurrency && SUPPORTED_CURRENCIES.has(String(rawCurrency).toUpperCase())
-            ? String(rawCurrency).toUpperCase()
-            : preferredCurrency;
-        const price = normalizePriceString(String(rawPrice), currency);
-        if (!Number.isFinite(price) || price <= 0) return;
-        candidates.push({
-            price,
-            currency,
-            selector,
-            source,
-            score,
-            snippet: `${rawPrice} ${currency}`
-        });
-    };
-
-    const rePriceAmount = /"priceAmount"\s*:\s*"([^"]+)"/gi;
-    for (const m of html.matchAll(rePriceAmount)) {
-        pushRaw(m[1], preferredCurrency, 88, 'raw-json');
-    }
-
-    const reOffer = /"price"\s*:\s*"([^"]+)"[^}]{0,200}?"priceCurrency"\s*:\s*"([A-Z]{3})"/gi;
-    for (const m of html.matchAll(reOffer)) {
-        pushRaw(m[1], m[2], 90, 'raw-json');
-    }
-
-    return candidates;
-}
-
-function extractFromJsonLd($, preferredCurrency) {
-    const candidates = [];
-    $('script[type*="ld+json"]').each((_, el) => {
-        const raw = $(el).contents().text();
-        if (!raw) return;
-        let parsed;
-        try {
-            parsed = JSON.parse(raw);
-        } catch {
-            return;
-        }
-
-        const stack = Array.isArray(parsed) ? [...parsed] : [parsed];
-        while (stack.length) {
-            const node = stack.pop();
-            if (!node || typeof node !== 'object') continue;
-
-            if (Array.isArray(node)) {
-                stack.push(...node);
-                continue;
-            }
-
-            if (node.offers) {
-                const offers = Array.isArray(node.offers) ? node.offers : [node.offers];
-                for (const offer of offers) {
-                    if (!offer || typeof offer !== 'object') continue;
-                    const priceValue = offer.price ?? offer.lowPrice ?? offer.highPrice;
-                    const currency = (offer.priceCurrency || preferredCurrency || 'USD').toString().toUpperCase();
-                    const price = normalizePriceString(String(priceValue ?? ''), currency);
-                    if (Number.isFinite(price) && price > 0) {
-                        candidates.push({
-                            price,
-                            currency: SUPPORTED_CURRENCIES.has(currency) ? currency : preferredCurrency,
-                            selector: 'script[type="application/ld+json"]',
-                            source: 'json-ld',
-                            score: 95,
-                            snippet: `${priceValue} ${currency}`
-                        });
-                    }
-                }
-            }
-
-            for (const key of Object.keys(node)) {
-                if (node[key] && typeof node[key] === 'object') stack.push(node[key]);
-            }
-        }
-    });
-    return candidates;
-}
-
-function collectSelectorCandidates($, selectors, preferredCurrency, source, scoreBase) {
-    const candidates = [];
-    for (const sel of selectors) {
-        let elements;
-        try {
-            elements = $(sel);
-        } catch {
-            continue;
-        }
-        if (!elements || !elements.length) continue;
-        elements.slice(0, 5).each((_, el) => {
-            const text = $(el).attr('content')
-                || $(el).attr('data-price')
-                || $(el).attr('aria-label')
-                || $(el).text();
-            const candidate = buildCandidate(text, sel, source, preferredCurrency, scoreBase);
-            if (candidate) candidates.push(candidate);
-        });
-    }
-    return candidates;
-}
-
-function rankCandidates(candidates) {
-    const dedup = new Map();
-    for (const c of candidates) {
-        const key = `${c.selector}|${c.price}|${c.currency}`;
-        const existing = dedup.get(key);
-        if (!existing || c.score > existing.score) dedup.set(key, c);
-    }
-    return Array.from(dedup.values()).sort((a, b) => b.score - a.score);
-}
-
-function parseHtml(htmlString, customSelector = null, targetUrl = '') {
-    const $ = cheerio.load(htmlString);
-    const { preferredCurrency, selectors: siteSelectors } = getDomainHints(targetUrl);
-    const isAmazon = isAmazonTarget(targetUrl);
-    const candidates = [];
-    const availability = detectAvailability($, htmlString, targetUrl);
-
-    candidates.push(...extractFromJsonLd($, preferredCurrency));
-    if (!isAmazon) {
-        candidates.push(...extractFromRawPatterns(htmlString, preferredCurrency, targetUrl));
-    }
-
-    if (customSelector) {
-        const customSelectors = [
-            customSelector,
-            `#${customSelector}`,
-            `.${customSelector}`,
-            `[data-test-id="${customSelector}"]`,
-            `[data-testid="${customSelector}"]`
-        ];
-        candidates.push(...collectSelectorCandidates($, customSelectors, preferredCurrency, 'custom', 88));
-    }
-
-    const selectors = isAmazon
-        ? [...new Set([
-            ...siteSelectors,
-            'meta[property="og:price:amount"]',
-            'meta[itemprop="price"]',
-            'meta[property="product:price:amount"]'
-        ])]
-        : [...new Set([...siteSelectors, ...BASE_PRICE_SELECTORS])];
-    candidates.push(...collectSelectorCandidates($, selectors, preferredCurrency, 'selector', 60));
-
-    if (!isAmazon) {
-        const priceLikeTexts = [];
-        $('body *').slice(0, 1200).each((_, el) => {
-            const txt = $(el).text();
-            if (!txt) return;
-            const compact = txt.replace(/\s+/g, ' ').trim();
-            if (!compact || compact.length < 2 || compact.length > 140) return;
-            if (/(price|fiyat|discount|sale|deal|ourprice|\u20ba|\u20ac|\u00a3|\$|TRY|USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY)/i.test(compact)) {
-                priceLikeTexts.push(compact);
-            }
-        });
-        for (const txt of priceLikeTexts.slice(0, 120)) {
-            const c = buildCandidate(txt, '', 'text', preferredCurrency, 30);
-            if (c) candidates.push(c);
-        }
-    }
-
-    const amazonScopedCandidates = isAmazon
-        ? candidates.filter((c) => {
-            const sel = String(c.selector || '').toLowerCase();
-            if (c.source === 'custom') return true;
-            if (sel.includes('#coreprice') || sel.includes('#priceblock_') || sel.includes('#price_inside_buybox') || sel.includes('#apex_') || sel.includes('twister-plus-price-data-price')) return true;
-            if (sel.includes('meta[itemprop="price"]') || sel.includes('meta[property="og:price:amount"]') || sel.includes('meta[property="product:price:amount"]')) return true;
-            return false;
-        }).filter((c) => c.currency === preferredCurrency)
-        : candidates;
-
-    const ranked = rankCandidates(amazonScopedCandidates);
-    const best = ranked[0] || null;
-    const suggestions = ranked.slice(0, 5).map(c => ({
-        selector: c.selector || '(text candidate)',
-        snippet: c.snippet,
-        score: c.score,
-        price: c.price,
-        currency: c.currency
-    }));
-
-    const shouldSuppressAmazonOutOfStockPrice = isAmazon
-        && availability.status === 'out_of_stock'
-        && Number(availability.confidence || 0) >= 80;
-
-    const noPriceConfidence = (() => {
-        const stockConf = Number(availability && availability.confidence);
-        if (Number.isFinite(stockConf) && stockConf > 0 && availability && availability.status === 'out_of_stock') {
-            return stockConf;
-        }
-        return 0;
-    })();
-
-    if (!best || shouldSuppressAmazonOutOfStockPrice) {
-        return {
-            price: null,
-            currency: preferredCurrency,
-            confidence: normalizeConfidence(noPriceConfidence),
-            selectorUsed: null,
-            source: null,
-            suggestions,
-            availability,
-            debug: {
-                isAmazon,
-                candidateCount: candidates.length,
-                rankedCount: ranked.length,
-                suppressedPriceBecauseOutOfStock: shouldSuppressAmazonOutOfStockPrice,
-                availabilitySignals: availability && availability.signals ? availability.signals : null
-            }
-        };
-    }
-
-    return {
-        price: best.price,
-        currency: best.currency || preferredCurrency,
-        confidence: normalizeConfidence(best.score),
-        selectorUsed: best.selector || null,
-        source: best.source || null,
-        suggestions,
-        availability,
-        debug: {
-            isAmazon,
-            candidateCount: candidates.length,
-            rankedCount: ranked.length,
-            suppressedPriceBecauseOutOfStock: false,
-            availabilitySignals: availability && availability.signals ? availability.signals : null
-        }
-    };
-}
-
-function extractTitleFromHtml(htmlString) {
-    const $ = cheerio.load(htmlString);
-    const candidates = [
-        $('meta[property="og:title"]').attr('content'),
-        $('meta[name="twitter:title"]').attr('content'),
-        $('h1').first().text(),
-        $('title').first().text()
-    ].map(v => String(v || '').trim()).filter(Boolean);
-    if (!candidates.length) return null;
-    return candidates[0].replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 async function refreshExchangeRates() {
@@ -2800,166 +1702,166 @@ function convertToUSD(amount, currency) {
     return amount / rate;
 }
 
-// Helper: Get or Init Browser
-async function getBrowser() {
-    if (browserInstance) {
-        if (!browserInstance.isConnected()) {
-            console.log('Browser disconnected, restarting...');
-            await browserInstance.close().catch(() => { });
-            browserInstance = null;
-        } else {
-            return browserInstance;
-        }
-    }
-
-    console.log('Launching new Puppeteer instance...');
-    const executablePath = resolveBrowserExecutablePath();
-    if (process.env.PUPPETEER_EXECUTABLE_PATH && !executablePath) {
-        console.warn(`[Browser] Configured PUPPETEER_EXECUTABLE_PATH not found: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
-    }
-    if (executablePath) {
-        console.log(`[Browser] Using executable: ${executablePath}`);
-    } else {
-        console.log('[Browser] Using Puppeteer default browser resolution.');
-    }
-    browserInstance = await puppeteer.launch({
-        headless: "new",
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        ...(executablePath ? { executablePath } : {}),
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--window-size=1920,1080'
-        ]
-    });
-    return browserInstance;
-}
-
-// Helper: Fetch with Puppeteer (Reusing Browser)
-async function fetchWithPuppeteer(url) {
-    let page = null;
-    try {
-        if (TEST_FETCH_DELAY_MS) {
-            await delayMs(TEST_FETCH_DELAY_MS);
-        }
-        if (TEST_FAKE_FETCH_HTML) {
-            return TEST_FAKE_FETCH_HTML;
-        }
-
-        const browser = await getBrowser();
-        page = await browser.newPage();
-
-        // Randomize Viewport
-        await page.setViewport({ width: 1920, height: 1080 });
-
-        // Set User Agent
-        const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-        await page.setUserAgent(userAgent);
-
-        // Optimize: Block images/fonts/media
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-                req.abort();
-            } else {
-                req.continue();
-            }
-        });
-
-        // Navigate
-        // Using domcontentloaded is faster than 'networkidle0' but might miss late JS 
-        // We add a small sleep to be safe.
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-
-        // Wait a bit for JS frameworks (React/Vue hydration)
-        await new Promise(r => setTimeout(r, 2000));
-
-        const html = await page.content();
-        return html;
-
-    } catch (e) {
-        // If browser crashes, reset instance
-        if (e.message.includes('Session closed') || e.message.includes('not opened')) {
-            if (browserInstance) await browserInstance.close().catch(() => { });
-            browserInstance = null;
-        }
-        throw new Error(`Puppeteer fetch failed: ${e.message}`);
-    } finally {
-        if (page) await page.close(); // Only close the page, keep browser open
-    }
+async function fetchWithPuppeteer(url, selector = null) {
+    if (TEST_FETCH_DELAY_MS) await delayMs(TEST_FETCH_DELAY_MS);
+    if (TEST_FAKE_FETCH_HTML) return TEST_FAKE_FETCH_HTML;
+    return browserFetcher.fetch(url, selector);
 }
 
 // --- Notifications & Webhooks ---
 async function notifyAll(title, message, overrideSettings = null) {
-    const effective = overrideSettings && typeof overrideSettings === 'object'
-        ? { ...settings, ...overrideSettings }
-        : settings;
-    const result = {
-        local: { attempted: true, success: true, error: null, channel: 'Local' },
-        discord: { attempted: false, success: false, error: null, channel: 'Discord' },
-        telegram: { attempted: false, success: false, error: null, channel: 'Telegram' }
-    };
-
-    // 1. Local Notification
-    try {
-        notifier.notify({
-            title: title,
-            message: message,
-            sound: true,
-            wait: true
-        });
-    } catch (e) {
-        result.local.success = false;
-        result.local.error = e.message;
-        console.error('[Local Notification] Failed:', e.message);
-    }
-
-    // 2. Discord Webhook
-    if (effective.discordWebhook) {
-        result.discord.attempted = true;
-        try {
-            const discordUrl = buildDiscordWebhookUrl(effective.discordWebhook);
-            await axios.post(discordUrl, {
-                content: `**${title}**\n${message}`
-            });
-            result.discord.success = true;
-        } catch (e) {
-            result.discord.error = e.response
-                ? `${e.response.status} ${JSON.stringify(e.response.data)}`
-                : e.message;
-            if (e.response) {
-                console.error('[Discord Webhook] Failed:', e.response.status, JSON.stringify(e.response.data));
-            } else {
-                console.error('[Discord Webhook] Failed:', e.message);
-            }
-        }
-    }
-
-    // 3. Telegram Webhook (Simple bot implementation)
-    if (effective.telegramWebhook && effective.telegramChatId) {
-        result.telegram.attempted = true;
-        try {
-            const url = `https://api.telegram.org/bot${effective.telegramWebhook}/sendMessage`;
-            await axios.post(url, {
-                chat_id: effective.telegramChatId,
-                text: `*${title}*\n${message}`,
-                parse_mode: 'Markdown'
-            });
-            result.telegram.success = true;
-        } catch (e) {
-            result.telegram.error = e.response
-                ? `${e.response.status} ${JSON.stringify(e.response.data)}`
-                : e.message;
-            console.error('[Telegram Webhook] Failed:', e.message);
-        }
-    }
-
+    const effective = { ...settings, ...(overrideSettings || {}) };
+    effective.discordWebhook = buildDiscordWebhookUrl(effective.discordWebhook);
+    const result = {};
+    await Promise.all(['discord', 'telegram'].map(async channel => {
+        const attempted = channelsFor(effective).includes(channel);
+        result[channel] = { attempted, success: false, channel: channel === 'discord' ? 'Discord' : 'Telegram' };
+        if (attempted) Object.assign(result[channel], await deliver(channel, { title, message }, effective));
+    }));
     return result;
+}
+
+function normalizeRuntime(value) {
+    if (value == null) return emptyRuntime();
+    if (!isPlainObject(value) || !Array.isArray(value.events) || !isPlainObject(value.cooldowns)) throw new Error('Invalid notification state');
+    for (const event of value.events) {
+        if (!event || typeof event.id !== 'string' || typeof event.key !== 'string' || typeof event.title !== 'string'
+            || typeof event.message !== 'string' || !isPlainObject(event.channels) || !Number.isFinite(Date.parse(event.createdAt))) throw new Error('Invalid notification event');
+        for (const [channel, state] of Object.entries(event.channels)) {
+            if (!['discord', 'telegram'].includes(channel) || !state || !Number.isFinite(state.attempts)
+                || !Number.isFinite(state.nextAttempt)) throw new Error('Invalid notification delivery state');
+        }
+    }
+    return { ...emptyRuntime(), ...cloneJsonState(value) };
+}
+
+let deliveryRunning = false;
+let deliveryGeneration = 0;
+let maintenanceTimer = null;
+let stopping = false;
+async function processNotifications() {
+    if (deliveryRunning || stopping) return;
+    deliveryRunning = true;
+    try {
+        // Bound each pass. Channels run independently, so an unavailable
+        // destination never blocks the other channel's queue.
+        await Promise.all(['discord', 'telegram'].map(async channel => {
+            if (Number(runtime.channelRetryAt?.[channel] || 0) > Date.now()) return;
+            const due = runtime.events.filter(event => {
+                const state = event.channels[channel];
+                return state && !state.deliveredAt && state.nextAttempt <= Date.now();
+            }).slice(0, 10);
+            for (const event of due) {
+                if (stopping) break;
+                const generation = deliveryGeneration;
+                const effective = { ...settings, discordWebhook: buildDiscordWebhookUrl(settings.discordWebhook) };
+                const result = await deliver(channel, event, effective, { attempts: event.channels[channel].attempts + 1 });
+                await runStateMutation(async () => {
+                    // A restore may have replaced the queue while delivery was in flight.
+                    const current = runtime.events.find(candidate => candidate.id === event.id);
+                    if (generation !== deliveryGeneration || !current || current.channels[channel].deliveredAt) return;
+                    const next = cloneJsonState(runtime);
+                    const state = next.events.find(candidate => candidate.id === event.id).channels[channel];
+                    state.attempts += 1;
+                    state.lastAttempt = new Date().toISOString();
+                    state.error = result.error;
+                    if (result.success) state.deliveredAt = state.lastAttempt;
+                    else {
+                        state.nextAttempt = Date.now() + result.retryAfterMs;
+                        next.channelRetryAt = { ...next.channelRetryAt, [channel]: state.nextAttempt };
+                    }
+                    prune(next);
+                    store.write('runtime', next);
+                    runtime = next;
+                });
+                // Honor destination rate limits across the channel, not just one event.
+                if (!result.success) break;
+                await delayMs(300);
+            }
+        }));
+    } catch (error) {
+        console.error('[Delivery]', error.message);
+    } finally { deliveryRunning = false; }
+}
+
+async function runHealthChecks() {
+    if (stopping) return;
+    await runStateMutation(async () => {
+        const nextRuntime = cloneJsonState(runtime);
+        const changed = [];
+        for (const item of items) {
+            if (evaluateHealth(item, getAlertRules(), nextRuntime, settings)) changed.push({ ...item, healthAlerted: true });
+        }
+        prune(nextRuntime);
+        if (!changed.length && JSON.stringify(nextRuntime) === JSON.stringify(runtime)) return;
+        store.transaction(() => {
+            for (const item of changed) store.updateItem(item);
+            store.set('runtime', nextRuntime);
+        });
+        for (const item of changed) items[items.findIndex(i => i.id === item.id)] = item;
+        if (changed.length) bumpItemsRevision();
+        runtime = nextRuntime;
+    });
+    await processNotifications();
+}
+
+function healthSnapshot() {
+    const active = items.filter(item => !item.purchased);
+    const staleMs = Math.max(1, Number(getAlertRules().staleHours) || 12) * 3600000;
+    const pending = runtime.events.filter(e => Object.values(e.channels).some(c => !c.deliveredAt));
+    const failed = pending.filter(e => Object.values(e.channels).some(c => c.error));
+    const lastProgress = Date.parse(runtime.lastCheckCompleted || runtime.lastCheckStarted) || startedAt;
+    const overdue = active.length > 0 && Date.now() - lastProgress > Math.max(settings.checkIntervalMs * 2, 15 * 60000);
+    return {
+        version: require('./package.json').version,
+        startedAt: new Date(startedAt).toISOString(),
+        lastCheckStarted: runtime.lastCheckStarted, lastCheckCompleted: runtime.lastCheckCompleted,
+        checking: isChecking, overdue,
+        failingItems: active.filter(i => i.lastCheckStatus === 'fail').length,
+        staleItems: active.filter(i => Date.now() - (Date.parse(i.lastChecked || i.createdAt) || startedAt) > staleMs).length,
+        pendingNotifications: pending.length, failedNotifications: failed.length,
+        channels: channelsFor(settings),
+        backup: { ...runtime.backup, configured: hasBackupEncryptionConfigured(settings), unlocked: hasUnlockedBackupEncryptionSession(settings) },
+        deliveries: runtime.events.slice(-30).reverse().map(e => ({ id: e.id, title: e.title, createdAt: e.createdAt, channels: e.channels }))
+    };
+}
+
+// Caller holds the state mutation queue. Persist trusted price + alert intent in
+// one transaction, then publish memory and start delivery after commit.
+async function persistCheck(currentItem, extraction, errorMessage = null, nowIso = new Date().toISOString()) {
+    const nextRuntime = cloneJsonState(runtime);
+    let nextItem;
+    let checkError = typeof errorMessage === 'object' && errorMessage ? errorMessage.message : errorMessage;
+    if (!checkError) {
+        checkError = assessExtraction(currentItem, extraction, Date.parse(nowIso));
+    }
+    if (checkError) {
+        nextItem = buildFailedCheckItem(currentItem, checkError, nowIso);
+        nextItem.lastCheckErrorCode = errorMessage?.code || 'extraction_failed';
+        nextItem.retryAt = Number.isFinite(errorMessage?.retryAt) ? errorMessage.retryAt : null;
+        if (checkError.startsWith('Confirming unusual price')) {
+            const previous = currentItem.pendingPrice;
+            nextItem.pendingPrice = previous && previous.currency === extraction.currency
+                && Math.abs(previous.price - extraction.price) / extraction.price <= 0.01
+                && Date.parse(nowIso) - Date.parse(previous.at) <= 86400000
+                ? previous : { price: extraction.price, currency: extraction.currency, at: nowIso };
+        } else nextItem.pendingPrice = null;
+        const rules = getAlertRules();
+        if (rules.lowConfidenceEnabled && extraction && Number(extraction.confidence || 0) < Number(rules.lowConfidenceThreshold || 55)) {
+            if (enqueue(nextRuntime, settings, `lowconf:${currentItem.id}`, 'Low Extraction Confidence', `${currentItem.name}: ${checkError}\n${currentItem.url}`, Date.parse(nowIso), rules.notifyCooldownMinutes)) nextItem.healthAlerted = true;
+        }
+        if (evaluateHealth(nextItem, rules, nextRuntime, settings, Date.parse(nowIso))) nextItem.healthAlerted = true;
+    } else {
+        nextItem = buildSuccessfulCheckItem(currentItem, extraction, nowIso).nextItem;
+        evaluateAlerts(currentItem, nextItem, getAlertRules(), nextRuntime, settings, Date.parse(nowIso));
+    }
+    const normalized = normalizeIncomingItems([nextItem], currentItem.listId || 'default', { repairIds: false }).items[0];
+    store.transaction(() => { store.updateItem(normalized); store.set('runtime', nextRuntime); });
+    items[items.findIndex(item => item.id === currentItem.id)] = normalized;
+    runtime = nextRuntime;
+    bumpItemsRevision();
+    if (!DISABLE_SCHEDULED_JOBS) setImmediate(() => processNotifications());
+    return normalized;
 }
 
 function summarizeTestNotificationResult(result) {
@@ -2998,35 +1900,6 @@ function summarizeTestNotificationResult(result) {
 
 function getAlertRules() {
     return { ...DEFAULT_ALERT_RULES, ...(settings.alertRules || {}) };
-}
-
-function shouldSendAlert(alertKey, cooldownMinutes) {
-    // Cooldown is tracked per alert key (e.g., "drop:itemId") to prevent notification spam.
-    const now = Date.now();
-    const key = String(alertKey || '');
-    const cooldownMs = Math.max(1, Number(cooldownMinutes || DEFAULT_ALERT_RULES.notifyCooldownMinutes)) * 60 * 1000;
-    const last = alertCooldownByKey.get(key) || 0;
-    if ((now - last) < cooldownMs) return false;
-    alertCooldownByKey.set(key, now);
-    return true;
-}
-
-function findPriceNear24h(history, nowTs) {
-    const points = Array.isArray(history) ? history : [];
-    if (!points.length) return null;
-    const targetTs = nowTs - (24 * 60 * 60 * 1000);
-    let best = null;
-    let bestDelta = Number.POSITIVE_INFINITY;
-    for (const p of points) {
-        const ts = new Date(p.date).getTime();
-        if (!Number.isFinite(ts) || !Number.isFinite(Number(p.price))) continue;
-        const delta = Math.abs(ts - targetTs);
-        if (delta < bestDelta) {
-            bestDelta = delta;
-            best = p;
-        }
-    }
-    return best;
 }
 
 function buildDiscordWebhookUrl(rawWebhookUrl) {
@@ -3073,8 +1946,11 @@ async function checkPrices() {
     console.log(`[${new Date().toLocaleTimeString()}] Starting background check...`);
 
     let updatedCount = 0;
-    const rules = getAlertRules();
     try {
+        await runStateMutation(async () => {
+            const next = { ...runtime, lastCheckStarted: new Date().toISOString() };
+            store.write('runtime', next); runtime = next;
+        });
         const candidateIds = items.filter(item => !Boolean(item.purchased)).map(item => item.id);
 
         for (const itemId of candidateIds) {
@@ -3092,8 +1968,8 @@ async function checkPrices() {
             const nowTs = Date.now();
 
             try {
-                const html = await fetchWithPuppeteer(fetchUrl);
-                const extraction = parseHtml(html, fetchSelector, fetchUrl);
+                const html = await fetchWithPuppeteer(fetchUrl, fetchSelector);
+                const extraction = parseHtml(html, fetchSelector, fetchUrl, snapshotItem);
                 const persisted = await runItemsMutation(async () => {
                     if (!isBackgroundCheckRunActive(runToken)) {
                         return { skipped: true, reason: 'check-invalidated' };
@@ -3102,83 +1978,13 @@ async function checkPrices() {
                     if (!currentItem || Boolean(currentItem.purchased)) {
                         return { skipped: true, reason: 'item-missing' };
                     }
-                    if (itemSourceChanged(currentItem, fetchUrl, fetchSelector)) {
+                    if (itemSourceChanged(currentItem, fetchUrl, fetchSelector, snapshotItem)) {
                         return { skipped: true, reason: 'source-changed' };
                     }
 
-                    const result = buildSuccessfulCheckItem(currentItem, extraction, nowIso);
-                    const currentPrice = result.price;
-                    const oldPrice = Number(currentItem.currentPrice);
-
-                    if (!result.isOutOfStock && currentPrice !== currentItem.currentPrice) {
-                        if (rules.priceDropEnabled && Number.isFinite(oldPrice) && currentPrice < oldPrice) {
-                            const dropAmount = (oldPrice - currentPrice).toFixed(2);
-                            if (shouldSendAlert(`drop:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                                console.log(`[Price Drop] ${currentItem.name} dropped by ${dropAmount}!`);
-                                notifyAll('Price Drop Alert', `${currentItem.name} is now ${currentPrice} (Was ${oldPrice})`);
-                            }
-                        }
-
-                        if (rules.targetHitEnabled && currentItem.targetPrice && currentPrice <= currentItem.targetPrice && oldPrice > currentItem.targetPrice) {
-                            if (shouldSendAlert(`target:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                                console.log(`[Target Hit] ${currentItem.name} hit target of ${currentItem.targetPrice}!`);
-                                notifyAll('Target Price Hit', `${currentItem.name} is now ${currentPrice}, meeting your target of ${currentItem.targetPrice}!`);
-                            }
-                        }
-
-                        if (rules.priceDrop24hEnabled && Array.isArray(currentItem.history) && currentItem.history.length > 1) {
-                            const reference = findPriceNear24h(currentItem.history, nowTs);
-                            if (reference && Number(reference.price) > 0) {
-                                const pctDrop = ((Number(reference.price) - Number(currentPrice)) / Number(reference.price)) * 100;
-                                if (pctDrop >= Number(rules.priceDrop24hPercent || 0) && currentPrice < oldPrice) {
-                                    if (shouldSendAlert(`drop24h:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                                        notifyAll('24h Drop Alert', `${currentItem.name} dropped ${pctDrop.toFixed(2)}% in ~24h (now ${currentPrice}).`);
-                                    }
-                                }
-                            }
-                        }
-
-                        if (rules.allTimeLowEnabled) {
-                            const historyPrices = Array.isArray(currentItem.history)
-                                ? currentItem.history.map(h => Number(h.price)).filter(Number.isFinite)
-                                : [];
-                            const minBefore = Math.min(...historyPrices, Number.isFinite(oldPrice) ? oldPrice : Number.POSITIVE_INFINITY);
-                            if (currentPrice < minBefore) {
-                                if (shouldSendAlert(`atl:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                                    notifyAll('All-Time Low', `${currentItem.name} reached a new all-time low at ${currentPrice}.`);
-                                }
-                            }
-                        }
-                    }
-
-                    if (result.previousStockStatus !== 'out_of_stock' && result.isOutOfStock) {
-                        if (shouldSendAlert(`oos-transition:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                            notifyAll('Out of Stock', `${currentItem.name} appears to be out of stock.`);
-                        }
-                    } else if (result.previousStockStatus === 'out_of_stock' && result.stockStatus === 'in_stock') {
-                        if (shouldSendAlert(`back-in-stock:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                            notifyAll('Back in Stock', `${currentItem.name} appears to be back in stock.`);
-                        }
-                    }
-
-                    if (
-                        rules.lowConfidenceEnabled
-                        && Number(result.nextItem.extractionConfidence || 0) > 0
-                        && Number(result.nextItem.extractionConfidence) < Number(rules.lowConfidenceThreshold || 0)
-                    ) {
-                        if (shouldSendAlert(`lowconf:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                            notifyAll('Low Extraction Confidence', `${currentItem.name} confidence is ${Math.round(result.nextItem.extractionConfidence)}.`);
-                        }
-                    }
-
-                    const savedItem = await replaceItemState(itemId, result.nextItem, { allowDuplicateCanonicalUrls: false });
-                    return {
-                        skipped: false,
-                        savedItem,
-                        price: currentPrice,
-                        isOutOfStock: result.isOutOfStock,
-                        extraction
-                    };
+                    const savedItem = await persistCheck(currentItem, extraction, null, new Date().toISOString());
+                    return { skipped: false, savedItem, price: savedItem.currentPrice,
+                        isOutOfStock: savedItem.stockStatus === 'out_of_stock', extraction };
                 });
 
                 if (persisted.skipped) {
@@ -3195,7 +2001,7 @@ async function checkPrices() {
                     itemName: persisted.savedItem.name,
                     url: persisted.savedItem.url,
                     listId: persisted.savedItem.listId || 'default',
-                    ok: true,
+                    ok: persisted.savedItem.lastCheckStatus === 'ok',
                     price: persisted.price,
                     currency: persisted.savedItem.currency,
                     confidence: persisted.extraction.confidence || 0,
@@ -3204,7 +2010,7 @@ async function checkPrices() {
                     stockStatus: persisted.savedItem.stockStatus,
                     outOfStock: persisted.isOutOfStock,
                     stockReason: persisted.savedItem.stockReason || '',
-                    error: null
+                    error: persisted.savedItem.lastCheckError || null
                 }).catch((e) => {
                     console.error('[Diagnostics] Failed to append entry:', e.message);
                 });
@@ -3218,25 +2024,11 @@ async function checkPrices() {
                     if (!currentItem || Boolean(currentItem.purchased)) {
                         return { skipped: true, reason: 'item-missing' };
                     }
-                    if (itemSourceChanged(currentItem, fetchUrl, fetchSelector)) {
+                    if (itemSourceChanged(currentItem, fetchUrl, fetchSelector, snapshotItem)) {
                         return { skipped: true, reason: 'source-changed' };
                     }
 
-                    if (rules.staleEnabled) {
-                        const last = currentItem.lastChecked ? new Date(currentItem.lastChecked).getTime() : 0;
-                        const staleMs = Number(rules.staleHours || 0) * 60 * 60 * 1000;
-                        if (!last || (nowTs - last) > staleMs) {
-                            if (shouldSendAlert(`stale:${currentItem.id}`, rules.notifyCooldownMinutes)) {
-                                notifyAll('Stale Price Item', `${currentItem.name} has not had a successful check for over ${rules.staleHours}h.`);
-                            }
-                        }
-                    }
-
-                    const savedItem = await replaceItemState(
-                        itemId,
-                        buildFailedCheckItem(currentItem, error.message, nowIso),
-                        { allowDuplicateCanonicalUrls: false }
-                    );
+                    const savedItem = await persistCheck(currentItem, null, error, new Date().toISOString());
                     return {
                         skipped: false,
                         savedItem
@@ -3277,6 +2069,10 @@ async function checkPrices() {
         }
 
         lastCheckTime = new Date();
+        await runStateMutation(async () => {
+            const next = { ...runtime, lastCheckCompleted: lastCheckTime.toISOString() };
+            store.write('runtime', next); runtime = next;
+        });
         console.log(`[${new Date().toLocaleTimeString()}] Background check complete. Updated ${updatedCount} items.`);
     } catch (e) {
         console.error(`[Background Check] Failed: ${e.message}`);
@@ -3290,6 +2086,9 @@ async function checkPrices() {
 }
 
 // API Endpoints
+
+app.get('/api/health', (_req, res) => res.json(healthSnapshot()));
+app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
 
 // Get Items & Status
 app.get('/api/items', (req, res) => {
@@ -3451,23 +2250,20 @@ app.post('/api/items/:id/check-result', async (req, res) => {
             if (Boolean(currentItem.purchased)) {
                 throw createApiError(400, 'Purchased items are excluded from refresh checks');
             }
-            if (itemSourceChanged(currentItem, body.expectedUrl, body.expectedSelector)) {
+            if (itemSourceChanged(currentItem, body.expectedUrl, body.expectedSelector, { currencyOverride: body.expectedCurrencyOverride, priceLocale: body.expectedPriceLocale })) {
                 const message = 'Item changed during refresh. Reload and try again.';
                 throw createApiError(409, message, getItemsConflictPayload(message));
             }
 
-            if (body.error) {
-                return replaceItemState(
-                    id,
-                    buildFailedCheckItem(currentItem, body.error, new Date().toISOString()),
-                    { allowDuplicateCanonicalUrls: false }
-                );
-            }
-            const extraction = isPlainObject(body.extraction) ? body.extraction : {};
-            const { nextItem } = buildSuccessfulCheckItem(currentItem, extraction, new Date().toISOString());
-            return replaceItemState(id, nextItem, { allowDuplicateCanonicalUrls: false });
+            return persistCheck(currentItem, isPlainObject(body.extraction) ? body.extraction : {}, body.error ? { message: body.error, code: body.errorCode, retryAt: body.retryAt } : null);
+
         });
 
+        await addDiagnostic({ itemId: savedItem.id, itemName: savedItem.name, url: savedItem.url,
+            listId: savedItem.listId, ok: savedItem.lastCheckStatus === 'ok', price: savedItem.currentPrice,
+            currency: savedItem.currency, confidence: savedItem.extractionConfidence,
+            selectorUsed: savedItem.lastSelectorUsed, stockStatus: savedItem.stockStatus,
+            outOfStock: savedItem.stockStatus === 'out_of_stock', error: savedItem.lastCheckError || null });
         res.json(getItemsSuccessPayload({ item: savedItem }));
     } catch (e) {
         if (e.status && e.payload) {
@@ -3623,7 +2419,7 @@ app.post('/api/settings', async (req, res) => {
                 }
 
                 if (backupPassword) {
-                    const backupResult = await performBackup();
+                    const backupResult = await performBackup({ alreadyLocked: true });
                     if (!backupResult.success) {
                         throw new Error(backupResult.error || backupResult.reason || 'Failed to create encrypted backup');
                     }
@@ -3778,7 +2574,7 @@ app.post('/api/lists/:id/delete', async (req, res) => {
             });
             const nextLists = lists.filter(l => l.id !== id);
             const nextSettings = normalizeSettingsShape({ ...settings, lists: nextLists });
-            await runJsonFileTransaction([
+            await commitState([
                 {
                     label: 'settings',
                     targetPath: SETTINGS_FILE,
@@ -3906,14 +2702,16 @@ app.post('/api/test-selector', async (req, res) => {
     if (!url) return res.status(400).json({ error: 'URL is required' });
 
     try {
+        extractionOptions(req.body);
         await validateFetchUrl(url);
-        const html = await fetchWithPuppeteer(url);
-        const result = parseHtml(html, selector, url);
+        const html = await fetchWithPuppeteer(url, selector);
+        const result = parseHtml(html, selector, url, req.body);
         res.json({
             success: true,
             price: result.price,
             currency: result.currency,
             confidence: result.confidence,
+            rejection: result.rejection || null,
             source: result.source || null,
             selectorUsed: result.selectorUsed,
             suggestions: result.suggestions || [],
@@ -3921,16 +2719,10 @@ app.post('/api/test-selector', async (req, res) => {
             debug: result.debug || null
         });
     } catch (e) {
-        const isValidationError = [
-            'Invalid URL',
-            'Only http/https URLs are allowed',
-            'Refusing localhost fetch',
-            'Host is not allowlisted',
-            'Failed to resolve hostname',
-            'Hostname has no DNS records',
-            'Refusing private/link-local destination'
-        ].includes(e.message);
-        res.status(isValidationError ? 400 : 500).json({ error: e.message });
+        const invalid = /Invalid|Unsupported currency|Only http|Refusing|allowlisted|hostname|DNS|Credentials/.test(e.message);
+        if (e.retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((e.retryAt - Date.now()) / 1000))));
+        res.status(e.code === 'retry_later' || e.code === 'rate_limited' ? 429 : invalid ? 400 : 502)
+            .json({ error: e.message, code: e.code || 'extraction_failed', retryAt: e.retryAt || null });
     }
 });
 
@@ -3939,9 +2731,10 @@ app.post('/api/extract', async (req, res) => {
     if (!url) return res.status(400).json({ error: 'URL is required' });
 
     try {
+        extractionOptions(req.body);
         await validateFetchUrl(url);
-        const html = await fetchWithPuppeteer(url);
-        const result = parseHtml(html, selector || null, url);
+        const html = await fetchWithPuppeteer(url, selector);
+        const result = parseHtml(html, selector || null, url, req.body);
         const title = extractTitleFromHtml(html);
         res.json({
             success: true,
@@ -3949,6 +2742,7 @@ app.post('/api/extract', async (req, res) => {
             currency: result.currency,
             title: title,
             confidence: result.confidence,
+            rejection: result.rejection || null,
             source: result.source || null,
             selectorUsed: result.selectorUsed,
             suggestions: result.suggestions || [],
@@ -3956,16 +2750,10 @@ app.post('/api/extract', async (req, res) => {
             debug: result.debug || null
         });
     } catch (e) {
-        const isValidationError = [
-            'Invalid URL',
-            'Only http/https URLs are allowed',
-            'Refusing localhost fetch',
-            'Host is not allowlisted',
-            'Failed to resolve hostname',
-            'Hostname has no DNS records',
-            'Refusing private/link-local destination'
-        ].includes(e.message);
-        res.status(isValidationError ? 400 : 500).json({ error: e.message });
+        const invalid = /Invalid|Unsupported currency|Only http|Refusing|allowlisted|hostname|DNS|Credentials/.test(e.message);
+        if (e.retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((e.retryAt - Date.now()) / 1000))));
+        res.status(e.code === 'retry_later' || e.code === 'rate_limited' ? 429 : invalid ? 400 : 502)
+            .json({ error: e.message, code: e.code || 'extraction_failed', retryAt: e.retryAt || null });
     }
 });
 
@@ -3985,6 +2773,10 @@ app.patch('/api/items/:id', async (req, res) => {
             const nextName = typeof updates.name === 'string' ? updates.name.trim() : currentItem.name;
             const nextUrl = typeof updates.url === 'string' ? updates.url.trim() : currentItem.url;
             const nextSelector = typeof updates.selector === 'string' ? updates.selector.trim() || null : (currentItem.selector || null);
+            const options = extractionOptions({ ...currentItem, ...updates });
+            if (options.currencyOverride && currentItem.currency && options.currencyOverride !== currentItem.currency) {
+                throw new Error(`Currency override conflicts with existing ${currentItem.currency} history. Add a new item to track a different currency.`);
+            }
             if (!nextName) {
                 throw createApiError(400, 'Name is required');
             }
@@ -4017,7 +2809,9 @@ app.patch('/api/items/:id', async (req, res) => {
                 name: nextName,
                 url: nextUrl,
                 canonicalUrl: nextCanonicalUrl,
-                selector: nextSelector
+                selector: nextSelector,
+                ...options,
+                pendingPrice: null
             }, { allowDuplicateCanonicalUrls: false });
         });
         res.json({ success: true, item: savedItem, revision: itemsRevision });
@@ -4135,101 +2929,13 @@ app.post('/api/backups/restore', async (req, res) => {
     }
 });
 
-function isPrivateOrSpecialIp(ipAddress) {
-    const family = net.isIP(ipAddress);
-    if (!family) return true;
-
-    if (family === 4) {
-        const octets = ipAddress.split('.').map(Number);
-        const [a, b] = octets;
-        if (a === 10) return true;
-        if (a === 127) return true;
-        if (a === 0) return true;
-        if (a === 169 && b === 254) return true;
-        if (a === 172 && b >= 16 && b <= 31) return true;
-        if (a === 192 && b === 168) return true;
-        return false;
-    }
-
-    const normalized = ipAddress.toLowerCase();
-    if (normalized === '::1') return true;
-    if (normalized.startsWith('fe80:')) return true;
-    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-    return false;
-}
-
-async function validateFetchUrl(rawUrl) {
-    // SSRF guardrail: parse URL, validate protocol, resolve DNS, reject local/private targets.
-    let parsed;
-    try {
-        parsed = new URL(rawUrl);
-    } catch {
-        throw new Error('Invalid URL');
-    }
-
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new Error('Only http/https URLs are allowed');
-    }
-
-    const hostname = parsed.hostname.toLowerCase();
-    if (hostname === 'localhost') {
-        throw new Error('Refusing localhost fetch');
-    }
-
-    if (FETCH_ALLOWED_HOSTS.length && !FETCH_ALLOWED_HOSTS.includes(hostname)) {
-        throw new Error('Host is not allowlisted');
-    }
-
-    let resolved;
-    try {
-        resolved = await dns.lookup(hostname, { all: true, verbatim: true });
-    } catch {
-        throw new Error('Failed to resolve hostname');
-    }
-
-    if (!resolved.length) {
-        throw new Error('Hostname has no DNS records');
-    }
-
-    if (resolved.some(record => isPrivateOrSpecialIp(record.address))) {
-        throw new Error('Refusing private/link-local destination');
-    }
-}
-
-// Proxy Fetch (for UI immediate checks)
-app.get('/api/fetch', async (req, res) => {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'Missing "url" query parameter' });
-
-    try {
-        await validateFetchUrl(url);
-        console.log(`[Proxy] Fetching: ${url}`);
-        const html = await fetchWithPuppeteer(url);
-        res.send(html);
-    } catch (error) {
-        console.error(`Error fetching ${url}:`, error.message);
-        const isValidationError = [
-            'Invalid URL',
-            'Only http/https URLs are allowed',
-            'Refusing localhost fetch',
-            'Host is not allowlisted',
-            'Failed to resolve hostname',
-            'Hostname has no DNS records',
-            'Refusing private/link-local destination'
-        ].includes(error.message);
-        res.status(isValidationError ? 400 : 500).json({ error: error.message });
-    }
-});
-
-
 // Initialization
 (async () => {
-    await recoverPendingJsonFileTransaction();
-    await migrateLegacyProjectRootData();
     await loadSettings();
     await loadData();
     await loadDiagnostics();
     await loadAuditLog();
+    if (BACKUP_PASSWORD_ENV && hasBackupEncryptionConfigured(settings)) await ensureBackupEncryptionSessionUnlocked(settings);
     if (!DISABLE_STARTUP_NETWORK) {
         await refreshExchangeRates();
     }
@@ -4242,14 +2948,16 @@ app.get('/api/fetch', async (req, res) => {
         setInterval(refreshExchangeRates, 60 * 60 * 1000);
     }
 
-    // Initial check (optional, but good to have recent data on startup)
-    // checkPrices(); 
+    if (!DISABLE_SCHEDULED_JOBS) {
+        maintenanceTimer = setInterval(() => runHealthChecks().catch(e => console.error('[Health]', e.message)), 30000);
+        setImmediate(() => { checkPrices(); runHealthChecks().catch(e => console.error('[Health]', e.message)); });
+    }
 
     // Perform initial backup
     if (!DISABLE_SCHEDULED_JOBS) {
         await performBackup();
         // Schedule daily backups
-        setInterval(() => performBackup(), 24 * 60 * 60 * 1000);
+        setInterval(() => performBackup().catch(e => console.error('[Backup]', e.message)), 24 * 60 * 60 * 1000);
     }
 
     const server = app.listen(PORT, () => {
@@ -4269,25 +2977,24 @@ Background checks running every ${activeCheckIntervalMs / 60000} minutes.
     // Graceful Shutdown
     const shutdown = async () => {
         console.log('Shutting down...');
-        if (browserInstance) {
-            console.log('Closing browser...');
-            await browserInstance.close().catch((e) => {
-                console.warn('[Shutdown] Browser close warning:', e.message);
-            });
-            browserInstance = null;
-        }
+        stopping = true;
+        const shutdownDeadline = setTimeout(() => process.exit(1), 20000);
+        shutdownDeadline.unref();
+        clearInterval(checkIntervalHandle);
+        clearInterval(maintenanceTimer);
+        await browserFetcher.close().catch(e => console.warn('[Browser]', e.message));
         server.close(() => {
             console.log('Server closed.');
+            store.close();
             process.exit(0);
         });
-        // Force exit if hanging
-        setTimeout(() => process.exit(1), 5000);
+
     };
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
 
-})();
+})().catch(error => { console.error('[Startup]', error.message); process.exitCode = 1; });
 
 
 

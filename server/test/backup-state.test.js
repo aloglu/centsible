@@ -39,7 +39,7 @@ async function waitForServer(baseUrl, child, logs) {
             throw new Error(`Server exited before becoming ready.\nSTDOUT:\n${logs.stdout}\nSTDERR:\n${logs.stderr}`);
         }
         try {
-            const response = await fetch(`${baseUrl}/settings`);
+            const response = await fetch(`${baseUrl}/settings`, { signal: AbortSignal.timeout(2000) });
             if (response.ok) return;
         } catch (_) { }
         await delay(250);
@@ -102,7 +102,7 @@ async function startServer(t, options = {}) {
     });
 
     const baseUrl = `http://127.0.0.1:${port}/api`;
-    await waitForServer(baseUrl, child, logs);
+    try { await waitForServer(baseUrl, child, logs); } catch (error) { child.kill('SIGKILL'); throw error; }
 
     const server = {
         port,
@@ -110,7 +110,7 @@ async function startServer(t, options = {}) {
         baseUrl,
         logs,
         async request(apiPath, init = {}) {
-            const response = await fetch(`${baseUrl}${apiPath}`, init);
+            const response = await fetch(`${baseUrl}${apiPath}`, { ...init, signal: AbortSignal.timeout(10000) }).catch(error => { throw new Error(`${init.method || 'GET'} ${apiPath}: ${error.message}\n${logs.stderr}`); });
             const text = await response.text();
             let json = null;
             if (text) {
@@ -560,79 +560,19 @@ test('items and lists payloads expose a list-state token that changes for list m
     assert.notEqual(afterListCreateToken, afterCreateToken);
 });
 
-test('startup recovers pending data transactions before migrating fresher legacy root state', async (t) => {
-    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'centsible-project-root-'));
-    const dataDir = path.join(projectRoot, 'data');
-    await fs.mkdir(dataDir, { recursive: true });
-    t.after(async () => {
-        await fs.rm(projectRoot, { recursive: true, force: true });
-    });
-
-    const legacyItems = [{
-        id: 'legacy-new',
-        name: 'Legacy Root Item',
-        url: 'https://example.com/legacy-root',
-        listId: 'default',
-        history: []
-    }];
-    const staleItems = [{
-        id: 'stale-old',
-        name: 'Stale Journal Item',
-        url: 'https://example.com/stale-journal',
-        listId: 'default',
-        history: []
-    }];
-    const targetItems = [{
-        id: 'target-current',
-        name: 'Interrupted Target Item',
-        url: 'https://example.com/interrupted-target',
-        listId: 'default',
-        history: []
-    }];
-
-    const legacyPricesPath = path.join(projectRoot, 'prices.json');
-    const dataPricesPath = path.join(dataDir, 'prices.json');
-    const backupPath = path.join(dataDir, '.prices.json.backup-test');
-    const tempPath = path.join(dataDir, '.prices.json.next-test');
-    const journalPath = path.join(dataDir, '.state-transaction.json');
-
-    await fs.writeFile(legacyPricesPath, JSON.stringify(legacyItems, null, 2), 'utf8');
-    await fs.writeFile(dataPricesPath, JSON.stringify(targetItems, null, 2), 'utf8');
-    await fs.writeFile(backupPath, JSON.stringify(staleItems, null, 2), 'utf8');
-    await fs.writeFile(journalPath, JSON.stringify({
-        createdAt: new Date().toISOString(),
-        entries: [{
-            label: 'items',
-            targetPath: dataPricesPath,
-            tempPath,
-            backupPath,
-            hadOriginal: true
-        }]
-    }, null, 2), 'utf8');
-
-    const oldTime = new Date(Date.now() - 60_000);
-    const newTime = new Date();
-    await fs.utimes(dataPricesPath, oldTime, oldTime);
-    await fs.utimes(backupPath, oldTime, oldTime);
-    await fs.utimes(legacyPricesPath, newTime, newTime);
-
-    const server = await startServer(t, {
-        projectRoot,
-        dataDir,
-        omitDataDirEnv: true,
-        cleanupDataDir: false
-    });
-
-    const itemsResponse = await server.get('/items');
-    assert.equal(itemsResponse.status, 200);
-    assert.equal(itemsResponse.json.items.length, 1);
-    assert.equal(itemsResponse.json.items[0].name, 'Legacy Root Item');
-
-    const persistedItems = JSON.parse(await fs.readFile(dataPricesPath, 'utf8'));
-    assert.equal(persistedItems.length, 1);
-    assert.equal(persistedItems[0].name, 'Legacy Root Item');
-
-    await assert.rejects(fs.access(journalPath));
+test('SQLite state survives a full process restart', async (t) => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'centsible-restart-'));
+    t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+    const first = await startServer(t, { dataDir, cleanupDataDir: false, autoStop: false });
+    const created = await first.post('/items/create', { revision: await getCurrentRevision(first), item: {
+        name: 'Persistent Product', url: 'https://example.com/product', currentPrice: 100, currency: 'USD'
+    } });
+    assert.equal(created.status, 200);
+    await first.stop();
+    const second = await startServer(t, { dataDir, cleanupDataDir: false });
+    const result = await second.get('/items');
+    assert.equal(result.json.items[0].name, 'Persistent Product');
+    assert.equal(result.json.items[0].currentPrice, 100);
 });
 
 test('import invalidates an in-flight background check before it can rewrite restored state', async (t) => {
@@ -693,9 +633,9 @@ test('import invalidates an in-flight background check before it can rewrite res
 test('item patch is serialized with background check persistence', async (t) => {
     const server = await startServer(t, {
         env: {
-            CENTSIBLE_TEST_FETCH_HTML: '<html><body><span>$25.00</span></body></html>',
-            CENTSIBLE_TEST_FETCH_DELAY_MS: '200',
-            CENTSIBLE_TEST_PATCH_DELAY_MS: '400'
+            CENTSIBLE_TEST_FETCH_HTML: '<html><head><meta itemprop="priceCurrency" content="USD"><meta itemprop="price" content="15.00"></head></html>',
+            CENTSIBLE_TEST_FETCH_DELAY_MS: '1200',
+            CENTSIBLE_TEST_PATCH_DELAY_MS: '1500'
         }
     });
 
@@ -726,14 +666,14 @@ test('item patch is serialized with background check persistence', async (t) => 
     });
     assert.equal(patched.status, 200, JSON.stringify(patched.json));
 
-    await delay(700);
+    await delay(1400);
 
     const itemsResponse = await server.get('/items');
     assert.equal(itemsResponse.status, 200);
     const patchedItem = itemsResponse.json.items.find(item => item.id === itemId);
     assert(patchedItem);
     assert.equal(patchedItem.name, 'Patch Renamed');
-    assert.equal(patchedItem.currentPrice, 25);
+    assert.equal(patchedItem.currentPrice, 15);
     assert.equal(patchedItem.lastCheckStatus, 'ok');
 });
 
@@ -813,4 +753,143 @@ test('backup listing marks corrupt files as non-restorable', async (t) => {
     assert(corruptBackup);
     assert.equal(Boolean(corruptBackup.preview.corrupt), true);
     assert.equal(Boolean(corruptBackup.preview.unsupported), true);
+});
+
+test('manual checks persist alerts atomically and retry delivery after a restart', async (t) => {
+    const http = require('node:http');
+    let attempts = 0;
+    const receiver = http.createServer((req, res) => {
+        attempts++;
+        req.resume();
+        if (attempts === 1) {
+            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '1' });
+            res.end(JSON.stringify({ retry_after: 1 }));
+        } else { res.writeHead(204); res.end(); }
+    });
+    await new Promise(resolve => receiver.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => receiver.close(resolve)));
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'centsible-delivery-'));
+    t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+    const env = {
+        DISCORD_WEBHOOK: `http://127.0.0.1:${receiver.address().port}/webhook`,
+        TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '',
+        CENTSIBLE_TEST_FETCH_HTML: '<meta itemprop="priceCurrency" content="USD"><meta itemprop="price" content="80">'
+    };
+    const first = await startServer(t, { dataDir, cleanupDataDir: false, env });
+    const settings = await first.get('/settings');
+    assert.equal((await first.post('/settings', { revision: settings.json.revision,
+        alertRules: { priceDropEnabled: true, targetHitEnabled: false, allTimeLowEnabled: false, priceDrop24hEnabled: false }
+    })).status, 200);
+    const created = await first.post('/items/create', { revision: await getCurrentRevision(first), item: {
+        name: 'Delivery fixture', url: 'https://example.com/product', currentPrice: 100, currency: 'USD',
+        history: [{ price: 100, date: new Date().toISOString() }]
+    } });
+    assert.equal(created.status, 200);
+    const checked = await first.post(`/items/${created.json.item.id}/check-result`, {
+        revision: created.json.revision, expectedUrl: created.json.item.url, expectedSelector: null,
+        extraction: { price: 80, currency: 'USD', confidence: 95, availability: { status: 'in_stock', confidence: 90 } }
+    });
+    assert.equal(checked.status, 200);
+    assert.equal(checked.json.item.currentPrice, 80);
+    assert.equal((await first.get('/health')).json.pendingNotifications, 1);
+    assert.equal(attempts, 0);
+    await first.stop();
+    const activeEnv = { ...env, CENTSIBLE_DISABLE_SCHEDULED_JOBS: '0' };
+    const second = await startServer(t, { dataDir, cleanupDataDir: false, env: activeEnv });
+    for (let i = 0; i < 30 && (await second.get('/health')).json.failedNotifications !== 1; i++) await delay(100);
+    assert.equal((await second.get('/health')).json.failedNotifications, 1);
+    await second.stop();
+    await delay(1100);
+    const third = await startServer(t, { dataDir, cleanupDataDir: false, env: activeEnv });
+    for (let i = 0; i < 30 && (await third.get('/health')).json.pendingNotifications; i++) await delay(100);
+    const health = (await third.get('/health')).json;
+    assert.equal(health.pendingNotifications, 0);
+    assert.equal(attempts, 2);
+    assert.equal(health.deliveries[0].channels.discord.attempts, 2);
+    assert(health.deliveries[0].channels.discord.deliveredAt);
+    assert.equal((await third.get('/items')).json.items[0].currentPrice, 80);
+});
+
+test('rejected extraction leaves price/history untouched and manual refresh uses the shared rules', async t => {
+    const server = await startServer(t);
+    const created = await server.post('/items/create', { revision: await getCurrentRevision(server), item: {
+        name: 'Trusted price', url: 'https://example.com/trusted', currentPrice: 1299, currency: 'EUR',
+        history: [{ price: 1299, date: new Date().toISOString() }]
+    } });
+    const result = await server.post(`/items/${created.json.item.id}/check-result`, {
+        revision: created.json.revision, expectedUrl: created.json.item.url,
+        extraction: { price: 1.29, currency: 'EUR', confidence: 95 }
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.json.item.currentPrice, 1299);
+    assert.equal(result.json.item.history.length, 1);
+    assert.equal(result.json.item.lastCheckStatus, 'fail');
+    assert.equal((await server.get('/diagnostics')).json.entries[0].ok, false);
+    assert.equal((await server.get('/health')).json.failingItems, 1);
+});
+
+test('frontend individual refresh and health view work in Chromium', async t => {
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+    try { await fs.access(executablePath); } catch { t.skip('Chromium not installed'); return; }
+    const server = await startServer(t, { env: { CENTSIBLE_TEST_FETCH_HTML: '<title>Fixture</title><meta itemprop="priceCurrency" content="USD"><meta itemprop="price" content="80.00">' } });
+    const created = await server.post('/items/create', { revision: await getCurrentRevision(server), item: {
+        name: 'UI fixture', url: 'https://93.184.216.34/product', currentPrice: 100, currency: 'USD'
+    } });
+    const puppeteer = require('puppeteer');
+    const browser = await puppeteer.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(server.baseUrl.replace('/api', ''), { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.app && app.items.length === 1);
+    await page.evaluate(async id => { await app.refreshItem(id); await app.renderHealthPanel(); }, created.json.item.id);
+    assert.equal((await server.get('/items')).json.items[0].currentPrice, 80);
+    assert.match(await page.$eval('#healthSummary', el => el.textContent), /queued alerts/);
+    await page.evaluate(id => {
+        app.showDoctorModal(id);
+        app.setPriceOptions('doctor', {currencyOverride:'USD',priceLocale:'en-US'});
+    }, created.json.item.id);
+    await page.evaluate(() => app.updateDoctorSelector());
+    const configured = (await server.get('/items')).json.items[0];
+    assert.equal(configured.currencyOverride, 'USD');
+    assert.equal(configured.priceLocale, 'en-US');
+    await page.evaluate(async id => app.refreshItem(id), created.json.item.id);
+    assert.equal((await server.get('/items')).json.items[0].lastCheckStatus, 'ok');
+    await page.evaluate(id => app.showDoctorModal(id), created.json.item.id);
+    await page.$eval('#doctorCurrencyOverride', el => el.closest('details').open = true);
+    await delay(400);
+    await page.screenshot({ path: path.join(os.tmpdir(), 'centsible-currency-review.png'), fullPage: true });
+    await page.evaluate(() => app.closeDoctorModal());
+    assert.deepEqual(errors, []);
+    await page.evaluate(() => app.switchView('audit'));
+    await page.screenshot({ path: path.join(os.tmpdir(), 'centsible-health-review.png'), fullPage: true });
+});
+
+test('currency settings survive restart and blocked checks preserve trusted history', async t => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(),'centsible-currency-'));
+    t.after(() => fs.rm(dataDir,{recursive:true,force:true}));
+    const server = await startServer(t,{dataDir,cleanupDataDir:false});
+    const created = await server.post('/items/create',{revision:await getCurrentRevision(server),item:{
+        name:'Lira fixture',url:'https://example.com/lira',currency:'TRY',currencyOverride:'TRY',priceLocale:'tr-TR',currentPrice:1299,
+        history:[{price:1299,date:new Date().toISOString()}]
+    }});
+    assert.equal(created.status,200);
+    const id = created.json.item.id;
+    const changed = await fetch(`${server.baseUrl}/items/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:created.json.revision,currencyOverride:'EUR'})});
+    assert.equal(changed.status,400);
+    const stale = await server.post(`/items/${id}/check-result`,{revision:created.json.revision,expectedUrl:created.json.item.url,extraction:{price:100,currency:'TRY',confidence:95}});
+    assert.equal(stale.status,409);
+    const blocked = await server.post(`/items/${id}/check-result`,{revision:created.json.revision,expectedUrl:created.json.item.url,expectedCurrencyOverride:'TRY',expectedPriceLocale:'tr-TR',error:'Website requires human verification',errorCode:'challenge'});
+    assert.equal(blocked.status,200);
+    assert.equal(blocked.json.item.currentPrice,1299);
+    assert.equal(blocked.json.item.history.length,1);
+    assert.equal(blocked.json.item.lastCheckErrorCode,'challenge');
+    assert.equal((await server.get('/health')).json.pendingNotifications,0);
+    await server.stop();
+    const restarted = await startServer(t,{dataDir,cleanupDataDir:false});
+    const saved = (await restarted.get('/items')).json.items[0];
+    assert.equal(saved.currencyOverride,'TRY');
+    assert.equal(saved.priceLocale,'tr-TR');
+    assert.equal(saved.currentPrice,1299);
 });

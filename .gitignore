@@ -6,3 +6,8 @@ settings.json
 audit.json
 diagnostics.json
 backups/
+
+node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -1,7 +1,7 @@
 {
-  "name": "server",
-  "version": "1.0.0",
-  "description": "1. Open this folder in your terminal. 2. Run `npm install` to install dependencies.",
+  "name": "centsible",
+  "version": "2.0.0",
+  "description": "Self-hosted price tracking with durable alerts",
   "main": "server.js",
   "scripts": {
     "test": "node --test",
@@ -11,14 +11,16 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "axios": "^1.13.4",
+    "axios": "^1.20.0",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.0",
     "express": "^5.2.1",
-    "node-notifier": "^10.0.1",
-    "puppeteer": "^24.36.1",
+    "puppeteer": "^25.11.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }
