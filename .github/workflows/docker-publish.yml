@@ -36,7 +36,12 @@ jobs:
           PUPPETEER_SKIP_DOWNLOAD: "true"
         run: |
           npm ci
-          npm test
+          npx puppeteer browsers install chrome
+          node scripts/configure-test-browser.mjs
+
+      - name: Regression tests
+        working-directory: ./server
+        run: npm test
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

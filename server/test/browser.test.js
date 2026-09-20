@@ -77,3 +77,27 @@ test('browser identifies challenges and honors only explicit Retry-After waits',
     assert.match(await fetcher.fetch(base+'/product'), /100 EUR/);
     assert.equal(hits,before+1);
 });
+
+test('proxy handles peer resets while CONNECT validation is pending', async t => {
+    const net = require('node:net');
+    const { FetchProxy } = require('../lib/fetch-proxy');
+    let entered;
+    let release;
+    const validating = new Promise(resolve => { entered = resolve; });
+    const validation = new Promise(resolve => { release = resolve; });
+    const proxy = new FetchProxy(async () => { entered(); await validation; throw new Error('Blocked'); });
+    const port = await proxy.start();
+    t.after(async () => { release(); await proxy.close(); });
+    const socket = net.connect({host:'127.0.0.1',port});
+    socket.on('error', () => {});
+    await new Promise(resolve => socket.once('connect',resolve));
+    socket.write('CONNECT blocked.invalid:443 HTTP/1.1\r\nHost: blocked.invalid\r\n\r\n');
+    await validating;
+    const disconnected = new Promise(resolve => socket.once('close',resolve));
+    socket.resetAndDestroy();
+    await disconnected;
+    await new Promise(resolve => setTimeout(resolve,50));
+    release();
+    await new Promise(resolve => setTimeout(resolve,50));
+    assert.equal(proxy.sockets.size,0);
+});

@@ -10,6 +10,8 @@ class FetchProxy {
         this.sockets = new Set();
         this.server = http.createServer(async (request, response) => {
             let upstream;
+            request.on('error', () => { upstream?.destroy(); response.destroy(); });
+            response.on('error', () => upstream?.destroy());
             try {
                 const target = await this.validateUrl(request.url, { subresource: true });
                 const url = new URL(request.url);
@@ -18,6 +20,7 @@ class FetchProxy {
                     method: request.method, path: url.pathname + url.search,
                     headers: { ...request.headers, host: url.host }, timeout: 45000 }, remote => {
                     response.writeHead(remote.statusCode, remote.headers);
+                    remote.on('error', () => response.destroy());
                     remote.pipe(response);
                 });
                 upstream.on('timeout', () => upstream.destroy(new Error('Upstream timeout')));
@@ -29,6 +32,9 @@ class FetchProxy {
             }
         });
         this.server.on('connection', socket => {
+            // CONNECT validation can await DNS before tunnel handlers exist.
+            // A peer reset during that interval must not escape as an unhandled error.
+            socket.on('error', () => socket.destroy());
             this.sockets.add(socket); socket.on('close', () => this.sockets.delete(socket));
         });
         this.server.on('connect', async (request, client, head) => {

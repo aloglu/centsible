@@ -39,7 +39,7 @@ jobs:
         working-directory: ./server
         run: |
           npx puppeteer browsers install chrome
-          echo "PUPPETEER_EXECUTABLE_PATH=$(node -p "require('puppeteer').executablePath()")" >> "$GITHUB_ENV"
+          node scripts/configure-test-browser.mjs
 
       - name: Regression tests
         working-directory: ./server
