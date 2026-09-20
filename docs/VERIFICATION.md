@@ -19,7 +19,7 @@ No deployment or real notification delivery was performed. Extraction fixtures c
 
 ## Fresh-install behavior
 
-SQLite is the source of truth. Old root JSON files are not automatically migrated. Encrypted exports may be deliberately imported. Upgrade snapshots are private, unencrypted local recovery files; portable in-app backups remain encrypted. See the README for install, update, and rollback commands.
+SQLite is the source of truth. Old root JSON files are not automatically migrated. Encrypted exports may be deliberately imported. Upgrade snapshots are private, unencrypted local recovery files; portable in-app backups remain encrypted. See the [README](../README.md) for installation and the [operations guide](OPERATIONS.md) for updates and rollback.
 
 ## CI follow-up
 
